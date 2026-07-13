@@ -1,0 +1,14 @@
+login ssh -i ~/Downloads/Teexflow.pem ubuntu@51.20.96.179
+ 
+
+curl -X POST https://api.clerk.com/v1/allowed_origins \
+  -H "Authorization: Bearer sk_test_sDNWHbwuobgIQLeGo8qBr3NVuY142RDVxuUIXa87ar" \
+  -H "Content-Type: application/json" \
+  -d '{"origin": "https://51.20.96.179"}'
+
+
+
+ssh -i ~/Downloads/Teexflow.pem ubuntu@51.20.96.179
+cd ~/teexflow
+docker compose -f docker-compose.prod.yml down
+docker compose -f docker-compose.prod.yml up -d --build
