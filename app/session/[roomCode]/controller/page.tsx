@@ -1,4 +1,3 @@
-// app/session/[roomCode]/controller/page.tsx
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
@@ -24,6 +23,7 @@ export default function ControllerPage() {
   const speedRef = useRef(0.7)
 
   const [voiceMode, setVoiceMode] = useState(false)
+  const [mirrorMode, setMirrorMode] = useState(false)
 
   useEffect(() => {
     speedRef.current = speed
@@ -99,6 +99,11 @@ export default function ControllerPage() {
 
   const broadcastSpeed = (newSpeed: number) => send('speed', { speed: newSpeed })
 
+  const broadcastMirror = (active: boolean) => {
+    console.log(`🪞 Sending mirror command: active=${active}`)
+    send('mirror', { active, from: 'controller' })
+  }
+
   const applyScroll = (percentage: number) => {
     if (!containerRef.current) return
     const container = containerRef.current
@@ -123,9 +128,17 @@ export default function ControllerPage() {
       }
     })
 
+    const unsubMirror = subscribe('mirror', (payload) => {
+      if (payload.from === 'display') {
+        console.log(`📩 Received mirror status from display: ${payload.active}`)
+        setMirrorMode(payload.active)
+      }
+    })
+
     return () => {
       unsubScroll()
       unsubVoice()
+      unsubMirror()
     }
   }, [subscribe])
 
@@ -233,6 +246,13 @@ export default function ControllerPage() {
     }
   }
 
+  const toggleMirrorMode = () => {
+    const newState = !mirrorMode
+    console.log(`🪞 Mirror button clicked. New state: ${newState}`)
+    setMirrorMode(newState)
+    broadcastMirror(newState)
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex items-center justify-center">
@@ -312,9 +332,21 @@ export default function ControllerPage() {
             {voiceMode ? '⏹ Stop Voice' : '🎤 Voice Track'}
           </button>
 
+          <button
+            onClick={toggleMirrorMode}
+            className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
+              ${mirrorMode
+                ? 'bg-cyan-500/90 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'
+                : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'
+              }`}
+          >
+            {mirrorMode ? '🪞 Mirror ON' : '🪞 Mirror OFF'}
+          </button>
+
           <div className="flex items-center gap-2 text-xs text-white/40">
             <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-red-400'}`}></span>
             {voiceMode && <span className="text-violet-300 font-medium">Voice active</span>}
+            {mirrorMode && <span className="text-cyan-300 font-medium">Mirror active</span>}
           </div>
         </div>
 
@@ -333,6 +365,11 @@ export default function ControllerPage() {
           {voiceMode && (
             <span className="flex items-center gap-1 text-violet-400">
               🎤 Voice tracking active
+            </span>
+          )}
+          {mirrorMode && (
+            <span className="flex items-center gap-1 text-cyan-400">
+              🪞 Mirror mode active
             </span>
           )}
         </div>

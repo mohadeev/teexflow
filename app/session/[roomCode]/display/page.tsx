@@ -1,4 +1,3 @@
-// app/session/[roomCode]/display/page.tsx
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
@@ -25,6 +24,7 @@ export default function DisplayPage() {
 
   const [voiceMode, setVoiceMode] = useState(false)
   const voiceModeRef = useRef(false)
+  const [mirrorMode, setMirrorMode] = useState(false)
   const wordsRef = useRef<string[]>([])
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
 
@@ -274,11 +274,19 @@ export default function DisplayPage() {
       }
     })
 
+    const unsubMirror = subscribe('mirror', (payload) => {
+      if (payload.from !== 'controller') return
+      const active = payload.active
+      console.log(`🪞 Display received mirror command: active=${active}`)
+      setMirrorMode(active)
+    })
+
     return () => {
       unsubScroll()
       unsubSpeed()
       unsubControl()
       unsubVoice()
+      unsubMirror()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
@@ -322,12 +330,41 @@ export default function DisplayPage() {
               </span>
             </>
           )}
+          {mirrorMode && (
+            <>
+              <span className="text-xs text-white/40">|</span>
+              <span className="text-xs font-medium text-cyan-400 flex items-center gap-1">
+                🪞 Mirror active
+              </span>
+            </>
+          )}
+
+          {/* Display-side mirror toggle (for two-way control) */}
+          <span className="text-xs text-white/40">|</span>
+          <button
+            onClick={() => {
+              const newState = !mirrorMode
+              setMirrorMode(newState)
+              send('mirror', { active: newState, from: 'display' })
+            }}
+            className={`text-xs px-3 py-1 rounded-full transition-colors
+              ${mirrorMode
+                ? 'bg-cyan-500/80 text-black hover:bg-cyan-400'
+                : 'bg-white/10 text-white/70 hover:bg-white/20'
+              }`}
+          >
+            🪞 {mirrorMode ? 'Mirror ON' : 'Mirror OFF'}
+          </button>
         </div>
 
         <div
           ref={containerRef}
           onScroll={handleScroll}
           className="w-[700px] h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl"
+          style={{
+            transform: mirrorMode ? 'scaleX(-1)' : 'none',
+            transition: 'transform 300ms ease',
+          }}
         >
           {words.map((word, index) => {
             const isHighlighted = highlightedIndex !== null && Math.abs(index - highlightedIndex) <= 2
