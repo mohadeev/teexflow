@@ -289,6 +289,12 @@ export default function DisplayPage() {
       setScriptWidth(payload.width)
     })
 
+    const unsubRefresh = subscribe('refresh', (payload) => {
+      if (payload.from !== 'controller') return
+      console.log('🔄 Display received refresh command — reloading...')
+      window.location.reload()
+    })
+
     return () => {
       unsubScroll()
       unsubSpeed()
@@ -296,6 +302,7 @@ export default function DisplayPage() {
       unsubVoice()
       unsubMirror()
       unsubWidth()
+      unsubRefresh()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
@@ -350,8 +357,9 @@ export default function DisplayPage() {
             </>
           )}
 
-          {/* Display-side mirror toggle (for two-way control) */}
           <span className="text-xs text-white/40">|</span>
+
+          {/* Display-side mirror toggle (for two-way control) */}
           <button
             onClick={() => {
               const newState = !mirrorMode

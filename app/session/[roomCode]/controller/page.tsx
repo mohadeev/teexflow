@@ -8,11 +8,11 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 const supabase = createClient()
 
 export default function ControllerPage() {
-  const { roomCode } = useParams<{ roomCode: string }>()
+  const { roomCode } = useParams()
   const [scriptContent, setScriptContent] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
-  const { send, subscribe, isConnected } = useWebSocket(roomCode)
+  const { send, subscribe, isConnected } = useWebSocket(roomCode as string)
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [speed, setSpeed] = useState(0.7)
@@ -290,6 +290,12 @@ export default function ControllerPage() {
     }, 80)
   }
 
+  // --- Refresh Display: tell the display to reload itself ---
+  const handleRefreshDisplay = () => {
+    console.log('🔄 Sending refresh command to display')
+    send('refresh', { from: 'controller' })
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex items-center justify-center">
@@ -330,6 +336,15 @@ export default function ControllerPage() {
                 : hasReachedBottomRef.current
                   ? '🔄 Restart'
                   : '▶ Play'}
+          </button>
+
+          {/* Refresh Display button */}
+          <button
+            onClick={handleRefreshDisplay}
+            title="Reload the display"
+            className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-slate-600/90 text-white hover:bg-slate-500 shadow-lg shadow-slate-600/20"
+          >
+            🔄 Refresh Display
           </button>
 
           {/* Speed control */}
