@@ -1,18 +1,20 @@
+// app/session/[roomCode]/controller/page.tsx
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { useWebSocket } from '@/hooks/useWebSocket'
 
 const supabase = createClient()
 
 export default function ControllerPage() {
-  const { roomCode } = useParams()
+  const { roomCode } = useParams<{ roomCode: string }>()
   const [scriptContent, setScriptContent] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
-  const [socket, setSocket] = useState<WebSocket | null>(null)
-  const [isConnected, setIsConnected] = useState(false)
+  const { send, subscribe, isConnected } = useWebSocket(roomCode)
+
   const [isPlaying, setIsPlaying] = useState(false)
   const [speed, setSpeed] = useState(0.7)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -85,36 +87,17 @@ export default function ControllerPage() {
     return (container.scrollTop / maxScroll) * 100
   }
 
-  const broadcastScroll = (percentage: number) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'scroll', payload: { percentage } }))
-    }
-  }
+  const broadcastScroll = (percentage: number) =>
+    send('scroll', { percentage, from: 'controller' })
 
-  const broadcastControl = (action: string) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'control', payload: { action } }))
-    }
-  }
+  const broadcastControl = (action: string) => send('control', { action })
 
   const broadcastVoice = (active: boolean) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const message = JSON.stringify({
-        type: 'voice',
-        payload: { active, from: 'controller' }
-      })
-      console.log(`📤 Sending voice command: ${message}`)
-      socket.send(message)
-    } else {
-      console.warn('⚠️ WebSocket not connected, cannot send voice command.')
-    }
+    console.log(`📤 Sending voice command: active=${active}`)
+    send('voice', { active, from: 'controller' })
   }
 
-  const broadcastSpeed = (newSpeed: number) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'speed', payload: { speed: newSpeed } }))
-    }
-  }
+  const broadcastSpeed = (newSpeed: number) => send('speed', { speed: newSpeed })
 
   const applyScroll = (percentage: number) => {
     if (!containerRef.current) return
@@ -126,7 +109,27 @@ export default function ControllerPage() {
     setTimeout(() => { isRemoteScrollRef.current = false }, 50)
   }
 
-  // --- Auto‑scroll loop (pauses when voiceMode is true) ---
+  // --- Subscribe to incoming WS messages ---
+  useEffect(() => {
+    const unsubScroll = subscribe('scroll', (payload) => {
+      if (payload.from === 'controller') return
+      applyScroll(payload.percentage)
+    })
+
+    const unsubVoice = subscribe('voice', (payload) => {
+      if (payload.from === 'display') {
+        console.log(`📩 Received voice status from display: ${payload.active}`)
+        setVoiceMode(payload.active)
+      }
+    })
+
+    return () => {
+      unsubScroll()
+      unsubVoice()
+    }
+  }, [subscribe])
+
+  // --- Auto-scroll loop (pauses when voiceMode is true) ---
   useEffect(() => {
     if (voiceMode) {
       if (animationRef.current) {
@@ -155,7 +158,7 @@ export default function ControllerPage() {
 
       const currentSpeed = speedRef.current
       const maxScroll = container.scrollHeight - container.clientHeight
-      const newScroll = Math.min(container.scrollTop + (delta * currentSpeed * 60), maxScroll)
+      const newScroll = Math.min(container.scrollTop + delta * currentSpeed * 60, maxScroll)
       container.scrollTop = newScroll
 
       const percentage = getScrollPercentage()
@@ -230,51 +233,6 @@ export default function ControllerPage() {
     }
   }
 
-  // --- WebSocket connection (uses roomCode) ---
-  useEffect(() => {
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080'
-    const ws = new WebSocket(`${wsUrl}?room=${roomCode}`)
-
-    ws.onopen = () => {
-      console.log('🔗 Controller WebSocket connected')
-      setIsConnected(true)
-      broadcastSpeed(speedRef.current)
-    }
-
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data)
-        if (message.type === 'scroll') {
-          applyScroll(message.payload.percentage)
-        }
-        if (message.type === 'voice') {
-          if (message.payload.from === 'display') {
-            console.log(`📩 Received voice status from display: ${message.payload.active}`)
-            setVoiceMode(message.payload.active)
-          }
-        }
-      } catch (err) {
-        console.error('WebSocket message error:', err)
-      }
-    }
-
-    ws.onclose = () => {
-      console.log('🔌 Controller WebSocket disconnected')
-      setIsConnected(false)
-    }
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error)
-    }
-
-    setSocket(ws)
-
-    return () => {
-      ws.close()
-      if (animationRef.current) cancelAnimationFrame(animationRef.current)
-    }
-  }, [roomCode])
-
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex items-center justify-center">
@@ -285,28 +243,15 @@ export default function ControllerPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex flex-col items-center justify-center p-6">
-      {/* Sleek custom scrollbar styles */}
       <style jsx>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 6px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: rgba(255, 255, 255, 0.03);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.15);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.25);
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.03); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
       `}</style>
 
       <div className="flex flex-col items-center w-full max-w-4xl gap-6">
-        {/* Glass‑morphism control panel */}
         <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex flex-wrap items-center justify-center gap-4">
-          {/* Play / Pause / Restart */}
           <button
             onClick={togglePlay}
             disabled={voiceMode}
@@ -330,7 +275,6 @@ export default function ControllerPage() {
                   : '▶ Play'}
           </button>
 
-          {/* Speed control */}
           <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
             <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Speed</span>
             <button
@@ -357,7 +301,6 @@ export default function ControllerPage() {
             <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{speed.toFixed(1)}x</span>
           </div>
 
-          {/* Voice tracking toggle */}
           <button
             onClick={toggleVoiceMode}
             className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
@@ -369,14 +312,12 @@ export default function ControllerPage() {
             {voiceMode ? '⏹ Stop Voice' : '🎤 Voice Track'}
           </button>
 
-          {/* Connection status */}
           <div className="flex items-center gap-2 text-xs text-white/40">
             <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-red-400'}`}></span>
             {voiceMode && <span className="text-violet-300 font-medium">Voice active</span>}
           </div>
         </div>
 
-        {/* Teleprompter script container */}
         <div
           ref={containerRef}
           onScroll={handleScroll}
@@ -385,7 +326,6 @@ export default function ControllerPage() {
           {scriptContent}
         </div>
 
-        {/* Status bar */}
         <div className="flex items-center gap-4 text-xs text-white/30">
           <span className="flex items-center gap-1">
             {isPlaying ? '● Auto‑scrolling' : '⏸ Paused'}

@@ -1,19 +1,21 @@
+// app/session/[roomCode]/display/page.tsx
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { useWebSocket } from '@/hooks/useWebSocket'
 import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition'
 
 const supabase = createClient()
 
 export default function DisplayPage() {
-  const { roomCode } = useParams()
+  const { roomCode } = useParams<{ roomCode: string }>()
   const [scriptContent, setScriptContent] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
-  const [socket, setSocket] = useState<WebSocket | null>(null)
-  const [isConnected, setIsConnected] = useState(false)
+  const { send, subscribe, isConnected } = useWebSocket(roomCode)
+
   const [isPlaying, setIsPlaying] = useState(false)
   const [speed, setSpeed] = useState(0.7)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -22,6 +24,7 @@ export default function DisplayPage() {
   const speedRef = useRef(0.7)
 
   const [voiceMode, setVoiceMode] = useState(false)
+  const voiceModeRef = useRef(false)
   const wordsRef = useRef<string[]>([])
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
 
@@ -29,12 +32,16 @@ export default function DisplayPage() {
     transcript,
     listening,
     resetTranscript,
-    browserSupportsSpeechRecognition
+    browserSupportsSpeechRecognition,
   } = useSpeechRecognition()
 
   useEffect(() => {
     speedRef.current = speed
   }, [speed])
+
+  useEffect(() => {
+    voiceModeRef.current = voiceMode
+  }, [voiceMode])
 
   // --- Fetch script and prepare word list ---
   useEffect(() => {
@@ -68,7 +75,7 @@ export default function DisplayPage() {
         }
 
         setScriptContent(scriptData.content)
-        wordsRef.current = scriptData.content.split(/\s+/).filter(w => w.length > 0)
+        wordsRef.current = scriptData.content.split(/\s+/).filter((w: string) => w.length > 0)
 
         if (containerRef.current && sessionData.scroll_percentage) {
           const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
@@ -86,7 +93,47 @@ export default function DisplayPage() {
     if (roomCode) fetchScript()
   }, [roomCode])
 
-  // --- Process transcript when it changes (voice recognition result) ---
+  // --- Broadcast helpers ---
+  const getScrollPercentage = () => {
+    if (!containerRef.current) return 0
+    const container = containerRef.current
+    const maxScroll = container.scrollHeight - container.clientHeight
+    if (maxScroll <= 0) return 0
+    return (container.scrollTop / maxScroll) * 100
+  }
+
+  const broadcastScroll = useCallback(
+    (percentage: number) => send('scroll', { percentage, from: 'display' }),
+    [send]
+  )
+
+  const applyScroll = useCallback((percentage: number) => {
+    if (!containerRef.current) return
+    const container = containerRef.current
+    const maxScroll = container.scrollHeight - container.clientHeight
+    const target = (percentage / 100) * maxScroll
+    isRemoteScrollRef.current = true
+    container.scrollTop = target
+    setTimeout(() => { isRemoteScrollRef.current = false }, 50)
+  }, [])
+
+  // --- Voice recognition ---
+  const startVoiceTracking = useCallback(() => {
+    if (!browserSupportsSpeechRecognition) {
+      alert('Your browser does not support speech recognition.')
+      return
+    }
+    console.log('🎤 Display: Starting microphone...')
+    SpeechRecognition.startListening({ continuous: true, language: 'en-US' })
+  }, [browserSupportsSpeechRecognition])
+
+  const stopVoiceTracking = useCallback(() => {
+    console.log('🎤 Display: Stopping microphone...')
+    SpeechRecognition.stopListening()
+    setHighlightedIndex(null)
+  }, [])
+
+  // --- Process transcript ---
   useEffect(() => {
     if (!voiceMode || !transcript || transcript.trim() === '') return
 
@@ -99,20 +146,14 @@ export default function DisplayPage() {
     const spokenWords = heard.split(/\s+/)
     let matchedIndex = -1
     for (const word of spokenWords) {
-      const idx = scriptWords.findIndex(w => w.toLowerCase() === word)
-      if (idx !== -1) {
-        matchedIndex = idx
-        break
-      }
+      const idx = scriptWords.findIndex((w) => w.toLowerCase() === word)
+      if (idx !== -1) { matchedIndex = idx; break }
     }
 
     if (matchedIndex === -1) {
       for (const word of spokenWords) {
-        const idx = scriptWords.findIndex(w => w.toLowerCase().includes(word))
-        if (idx !== -1) {
-          matchedIndex = idx
-          break
-        }
+        const idx = scriptWords.findIndex((w) => w.toLowerCase().includes(word))
+        if (idx !== -1) { matchedIndex = idx; break }
       }
     }
 
@@ -140,37 +181,9 @@ export default function DisplayPage() {
     }
 
     resetTranscript()
-  }, [transcript, voiceMode])
+  }, [transcript, voiceMode, broadcastScroll, resetTranscript, roomCode])
 
-  // --- Broadcast helpers ---
-  const getScrollPercentage = () => {
-    if (!containerRef.current) return 0
-    const container = containerRef.current
-    const maxScroll = container.scrollHeight - container.clientHeight
-    if (maxScroll <= 0) return 0
-    return (container.scrollTop / maxScroll) * 100
-  }
-
-  const broadcastScroll = (percentage: number) => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({
-        type: 'scroll',
-        payload: { percentage, from: 'display' }
-      }))
-    }
-  }
-
-  const applyScroll = (percentage: number) => {
-    if (!containerRef.current) return
-    const container = containerRef.current
-    const maxScroll = container.scrollHeight - container.clientHeight
-    const target = (percentage / 100) * maxScroll
-    isRemoteScrollRef.current = true
-    container.scrollTop = target
-    setTimeout(() => { isRemoteScrollRef.current = false }, 50)
-  }
-
-  // --- Auto‑scroll loop (disabled when voiceMode is on) ---
+  // --- Auto-scroll loop ---
   useEffect(() => {
     if (voiceMode) {
       if (animationRef.current) {
@@ -199,7 +212,7 @@ export default function DisplayPage() {
 
       const currentSpeed = speedRef.current
       const maxScroll = container.scrollHeight - container.clientHeight
-      let newScroll = container.scrollTop + (delta * currentSpeed * 60)
+      let newScroll = container.scrollTop + delta * currentSpeed * 60
       if (newScroll > maxScroll) newScroll = maxScroll
       container.scrollTop = newScroll
 
@@ -223,7 +236,7 @@ export default function DisplayPage() {
         animationRef.current = null
       }
     }
-  }, [isPlaying, loading, voiceMode])
+  }, [isPlaying, loading, voiceMode, broadcastScroll])
 
   const handleScroll = () => {
     if (isRemoteScrollRef.current) return
@@ -231,109 +244,43 @@ export default function DisplayPage() {
     broadcastScroll(percentage)
   }
 
-  // --- Voice recognition via react-speech-recognition ---
-  const startVoiceTracking = () => {
-    if (!browserSupportsSpeechRecognition) {
-      alert('Your browser does not support speech recognition.')
-      return
-    }
-    console.log('🎤 Display: Starting microphone...')
-    SpeechRecognition.startListening({ continuous: true, language: 'en-US' })
-    console.log('🎤 Voice tracking started on display')
-  }
-
-  const stopVoiceTracking = () => {
-    console.log('🎤 Display: Stopping microphone...')
-    SpeechRecognition.stopListening()
-    console.log('🎤 Voice tracking stopped on display')
-    setHighlightedIndex(null)
-  }
-
-  // --- Listen for voice toggle commands from controller ---
+  // --- Subscribe to WS messages ---
   useEffect(() => {
-    if (!socket) return
+    const unsubScroll = subscribe('scroll', (payload) => {
+      if (payload.from !== 'display') applyScroll(payload.percentage)
+    })
 
-    const handleMessage = (event: MessageEvent) => {
-      try {
-        const message = JSON.parse(event.data)
-        if (message.type === 'voice') {
-          if (message.payload.from === 'controller') {
-            const active = message.payload.active
-            console.log(`📩 Display received voice command: active=${active}`)
-            if (active && !voiceMode) {
-              console.log('🔊 Display: Activating voice mode...')
-              setVoiceMode(true)
-              startVoiceTracking()
-            } else if (!active && voiceMode) {
-              console.log('🔇 Display: Deactivating voice mode...')
-              setVoiceMode(false)
-              stopVoiceTracking()
-            } else {
-              console.log(`ℹ️ Voice mode already ${voiceMode ? 'ON' : 'OFF'}, ignoring.`)
-            }
-          }
-        }
-      } catch (err) {
-        console.error('❌ Error handling WebSocket message:', err)
+    const unsubSpeed = subscribe('speed', (payload) => {
+      setSpeed(payload.speed)
+      speedRef.current = payload.speed
+    })
+
+    const unsubControl = subscribe('control', (payload) => {
+      if (payload.action === 'play') setIsPlaying(true)
+      else if (payload.action === 'pause') setIsPlaying(false)
+    })
+
+    const unsubVoice = subscribe('voice', (payload) => {
+      if (payload.from !== 'controller') return
+      const active = payload.active
+      console.log(`📩 Display received voice command: active=${active}`)
+
+      if (active && !voiceModeRef.current) {
+        setVoiceMode(true)
+        startVoiceTracking()
+      } else if (!active && voiceModeRef.current) {
+        setVoiceMode(false)
+        stopVoiceTracking()
       }
-    }
-
-    socket.addEventListener('message', handleMessage)
-    return () => {
-      socket.removeEventListener('message', handleMessage)
-    }
-  }, [socket, voiceMode])
-
-  // --- WebSocket connection ---
-  useEffect(() => {
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080'
-    const ws = new WebSocket(`${wsUrl}?room=${roomCode}`)
-
-    ws.onopen = () => {
-      console.log('🔗 Display WebSocket connected')
-      setIsConnected(true)
-    }
-
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data)
-        if (message.type === 'scroll') {
-          if (message.payload.from !== 'display') {
-            applyScroll(message.payload.percentage)
-          }
-        }
-        if (message.type === 'speed') {
-          setSpeed(message.payload.speed)
-          speedRef.current = message.payload.speed
-        }
-        if (message.type === 'control') {
-          if (message.payload.action === 'play') setIsPlaying(true)
-          else if (message.payload.action === 'pause') setIsPlaying(false)
-        }
-        // Voice is already handled by the dedicated listener above.
-      } catch (err) {
-        console.error('❌ WebSocket message error:', err)
-      }
-    }
-
-    ws.onclose = () => {
-      console.log('🔌 Display WebSocket disconnected')
-      setIsConnected(false)
-      if (listening) SpeechRecognition.stopListening()
-    }
-
-    ws.onerror = (error) => {
-      console.error('❌ WebSocket error:', error)
-    }
-
-    setSocket(ws)
+    })
 
     return () => {
-      ws.close()
-      if (animationRef.current) cancelAnimationFrame(animationRef.current)
-      if (listening) SpeechRecognition.stopListening()
+      unsubScroll()
+      unsubSpeed()
+      unsubControl()
+      unsubVoice()
     }
-  }, [roomCode])
+  }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
   if (loading) {
     return (
@@ -347,26 +294,14 @@ export default function DisplayPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex flex-col items-center justify-center p-6">
-      {/* Sleek custom scrollbar styles */}
       <style jsx>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 6px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: rgba(255, 255, 255, 0.03);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.15);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.25);
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.03); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
       `}</style>
 
       <div className="flex flex-col items-center w-full max-w-4xl gap-6">
-        {/* Glass‑morphism status bar */}
         <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex items-center justify-center gap-6">
           <span className="text-xs font-medium text-white/60 flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-white/20'}`}></span>
@@ -389,7 +324,6 @@ export default function DisplayPage() {
           )}
         </div>
 
-        {/* Teleprompter script container */}
         <div
           ref={containerRef}
           onScroll={handleScroll}
