@@ -25,6 +25,8 @@ export default function DisplayPage() {
   const [voiceMode, setVoiceMode] = useState(false)
   const voiceModeRef = useRef(false)
   const [mirrorMode, setMirrorMode] = useState(false)
+  const [scriptWidth, setScriptWidth] = useState(700)
+
   const wordsRef = useRef<string[]>([])
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
 
@@ -281,12 +283,19 @@ export default function DisplayPage() {
       setMirrorMode(active)
     })
 
+    const unsubWidth = subscribe('width', (payload) => {
+      if (payload.from !== 'controller') return
+      console.log(`📩 Display received width: ${payload.width}`)
+      setScriptWidth(payload.width)
+    })
+
     return () => {
       unsubScroll()
       unsubSpeed()
       unsubControl()
       unsubVoice()
       unsubMirror()
+      unsubWidth()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
@@ -309,8 +318,8 @@ export default function DisplayPage() {
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
       `}</style>
 
-      <div className="flex flex-col items-center w-full max-w-4xl gap-6">
-        <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex items-center justify-center gap-6">
+      <div className="flex flex-col items-center w-full max-w-6xl gap-6">
+        <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex items-center justify-center gap-6 flex-wrap">
           <span className="text-xs font-medium text-white/60 flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-white/20'}`}></span>
             {isPlaying ? 'Playing' : 'Paused'}
@@ -322,6 +331,8 @@ export default function DisplayPage() {
           </span>
           <span className="text-xs text-white/40">|</span>
           <span className="text-xs font-mono text-cyan-300">Speed: {speed.toFixed(2)}x</span>
+          <span className="text-xs text-white/40">|</span>
+          <span className="text-xs font-mono text-cyan-300">Width: {scriptWidth}px</span>
           {voiceMode && (
             <>
               <span className="text-xs text-white/40">|</span>
@@ -360,10 +371,11 @@ export default function DisplayPage() {
         <div
           ref={containerRef}
           onScroll={handleScroll}
-          className="w-[700px] h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl"
+          className="h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl"
           style={{
+            width: `${scriptWidth}px`,
             transform: mirrorMode ? 'scaleX(-1)' : 'none',
-            transition: 'transform 300ms ease',
+            transition: 'transform 300ms ease, width 100ms ease-out',
           }}
         >
           {words.map((word, index) => {

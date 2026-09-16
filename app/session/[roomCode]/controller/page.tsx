@@ -25,9 +25,17 @@ export default function ControllerPage() {
   const [voiceMode, setVoiceMode] = useState(false)
   const [mirrorMode, setMirrorMode] = useState(false)
 
+  const [scriptWidth, setScriptWidth] = useState(700)
+  const scriptWidthRef = useRef(700)
+  const widthDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   useEffect(() => {
     speedRef.current = speed
   }, [speed])
+
+  useEffect(() => {
+    scriptWidthRef.current = scriptWidth
+  }, [scriptWidth])
 
   // --- Fetch script ---
   useEffect(() => {
@@ -104,6 +112,10 @@ export default function ControllerPage() {
     send('mirror', { active, from: 'controller' })
   }
 
+  const broadcastWidth = (width: number) => {
+    send('width', { width, from: 'controller' })
+  }
+
   const applyScroll = (percentage: number) => {
     if (!containerRef.current) return
     const container = containerRef.current
@@ -135,12 +147,27 @@ export default function ControllerPage() {
       }
     })
 
+    const unsubWidth = subscribe('width', (payload) => {
+      if (payload.from === 'display') {
+        console.log(`📩 Received width from display: ${payload.width}`)
+        setScriptWidth(payload.width)
+      }
+    })
+
     return () => {
       unsubScroll()
       unsubVoice()
       unsubMirror()
+      unsubWidth()
     }
   }, [subscribe])
+
+  // --- Broadcast width on connect (sync initial state) ---
+  useEffect(() => {
+    if (!isConnected) return
+    broadcastWidth(scriptWidthRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected])
 
   // --- Auto-scroll loop (pauses when voiceMode is true) ---
   useEffect(() => {
@@ -253,6 +280,16 @@ export default function ControllerPage() {
     broadcastMirror(newState)
   }
 
+  const handleWidthChange = (newWidth: number) => {
+    const clamped = Math.min(1400, Math.max(300, newWidth))
+    setScriptWidth(clamped)
+
+    if (widthDebounceRef.current) clearTimeout(widthDebounceRef.current)
+    widthDebounceRef.current = setTimeout(() => {
+      broadcastWidth(clamped)
+    }, 80)
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex items-center justify-center">
@@ -270,7 +307,7 @@ export default function ControllerPage() {
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
       `}</style>
 
-      <div className="flex flex-col items-center w-full max-w-4xl gap-6">
+      <div className="flex flex-col items-center w-full max-w-6xl gap-6">
         <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex flex-wrap items-center justify-center gap-4">
           <button
             onClick={togglePlay}
@@ -295,6 +332,7 @@ export default function ControllerPage() {
                   : '▶ Play'}
           </button>
 
+          {/* Speed control */}
           <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
             <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Speed</span>
             <button
@@ -319,6 +357,21 @@ export default function ControllerPage() {
               +
             </button>
             <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{speed.toFixed(1)}x</span>
+          </div>
+
+          {/* Width control */}
+          <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
+            <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Width</span>
+            <input
+              type="range"
+              min="300"
+              max="1400"
+              step="10"
+              value={scriptWidth}
+              onChange={(e) => handleWidthChange(parseInt(e.target.value, 10))}
+              className="w-32 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+            />
+            <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{scriptWidth}px</span>
           </div>
 
           <button
@@ -353,7 +406,11 @@ export default function ControllerPage() {
         <div
           ref={containerRef}
           onScroll={handleScroll}
-          className="w-[700px] h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-white text-xl leading-relaxed custom-scrollbar shadow-2xl"
+          className="h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-white text-xl leading-relaxed custom-scrollbar shadow-2xl"
+          style={{
+            width: `${scriptWidth}px`,
+            transition: 'width 100ms ease-out',
+          }}
         >
           {scriptContent}
         </div>
