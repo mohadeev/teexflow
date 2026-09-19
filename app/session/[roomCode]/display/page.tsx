@@ -9,11 +9,11 @@ import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognitio
 const supabase = createClient()
 
 export default function DisplayPage() {
-  const { roomCode } = useParams<{ roomCode: string }>()
+  const { roomCode } = useParams()
   const [scriptContent, setScriptContent] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
-  const { send, subscribe, isConnected } = useWebSocket(roomCode)
+  const { send, subscribe, isConnected } = useWebSocket(roomCode as string)
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [speed, setSpeed] = useState(0.7)
@@ -24,7 +24,8 @@ export default function DisplayPage() {
 
   const [voiceMode, setVoiceMode] = useState(false)
   const voiceModeRef = useRef(false)
-  const [mirrorMode, setMirrorMode] = useState(false)
+  const [mirrorMode, setMirrorMode] = useState(false)       // horizontal flip
+  const [flipVertical, setFlipVertical] = useState(false)   // vertical flip
   const [scriptWidth, setScriptWidth] = useState(700)
 
   const wordsRef = useRef<string[]>([])
@@ -279,8 +280,15 @@ export default function DisplayPage() {
     const unsubMirror = subscribe('mirror', (payload) => {
       if (payload.from !== 'controller') return
       const active = payload.active
-      console.log(`🪞 Display received mirror command: active=${active}`)
+      console.log(`↔️ Display received horizontal flip: active=${active}`)
       setMirrorMode(active)
+    })
+
+    const unsubFlipVertical = subscribe('flipVertical', (payload) => {
+      if (payload.from !== 'controller') return
+      const active = payload.active
+      console.log(`↕️ Display received vertical flip: active=${active}`)
+      setFlipVertical(active)
     })
 
     const unsubWidth = subscribe('width', (payload) => {
@@ -301,6 +309,7 @@ export default function DisplayPage() {
       unsubControl()
       unsubVoice()
       unsubMirror()
+      unsubFlipVertical()
       unsubWidth()
       unsubRefresh()
     }
@@ -315,6 +324,9 @@ export default function DisplayPage() {
   }
 
   const words = wordsRef.current
+
+  // Combined flip transform
+  const flipTransform = `scaleX(${mirrorMode ? -1 : 1}) scaleY(${flipVertical ? -1 : 1})`
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex flex-col items-center justify-center p-6">
@@ -352,14 +364,22 @@ export default function DisplayPage() {
             <>
               <span className="text-xs text-white/40">|</span>
               <span className="text-xs font-medium text-cyan-400 flex items-center gap-1">
-                🪞 Mirror active
+                ↔️ Flip H
+              </span>
+            </>
+          )}
+          {flipVertical && (
+            <>
+              <span className="text-xs text-white/40">|</span>
+              <span className="text-xs font-medium text-cyan-400 flex items-center gap-1">
+                ↕️ Flip V
               </span>
             </>
           )}
 
           <span className="text-xs text-white/40">|</span>
 
-          {/* Display-side mirror toggle (for two-way control) */}
+          {/* Display-side horizontal flip toggle */}
           <button
             onClick={() => {
               const newState = !mirrorMode
@@ -372,7 +392,23 @@ export default function DisplayPage() {
                 : 'bg-white/10 text-white/70 hover:bg-white/20'
               }`}
           >
-            🪞 {mirrorMode ? 'Mirror ON' : 'Mirror OFF'}
+            ↔️ {mirrorMode ? 'Flip H ON' : 'Flip H OFF'}
+          </button>
+
+          {/* Display-side vertical flip toggle */}
+          <button
+            onClick={() => {
+              const newState = !flipVertical
+              setFlipVertical(newState)
+              send('flipVertical', { active: newState, from: 'display' })
+            }}
+            className={`text-xs px-3 py-1 rounded-full transition-colors
+              ${flipVertical
+                ? 'bg-cyan-500/80 text-black hover:bg-cyan-400'
+                : 'bg-white/10 text-white/70 hover:bg-white/20'
+              }`}
+          >
+            ↕️ {flipVertical ? 'Flip V ON' : 'Flip V OFF'}
           </button>
         </div>
 
@@ -382,7 +418,7 @@ export default function DisplayPage() {
           className="h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl"
           style={{
             width: `${scriptWidth}px`,
-            transform: mirrorMode ? 'scaleX(-1)' : 'none',
+            transform: flipTransform,
             transition: 'transform 300ms ease, width 100ms ease-out',
           }}
         >

@@ -23,7 +23,8 @@ export default function ControllerPage() {
   const speedRef = useRef(0.7)
 
   const [voiceMode, setVoiceMode] = useState(false)
-  const [mirrorMode, setMirrorMode] = useState(false)
+  const [mirrorMode, setMirrorMode] = useState(false)       // horizontal flip
+  const [flipVertical, setFlipVertical] = useState(false)   // vertical flip
 
   const [scriptWidth, setScriptWidth] = useState(700)
   const scriptWidthRef = useRef(700)
@@ -112,6 +113,11 @@ export default function ControllerPage() {
     send('mirror', { active, from: 'controller' })
   }
 
+  const broadcastFlipVertical = (active: boolean) => {
+    console.log(`↕️ Sending vertical flip command: active=${active}`)
+    send('flipVertical', { active, from: 'controller' })
+  }
+
   const broadcastWidth = (width: number) => {
     send('width', { width, from: 'controller' })
   }
@@ -147,6 +153,13 @@ export default function ControllerPage() {
       }
     })
 
+    const unsubFlipVertical = subscribe('flipVertical', (payload) => {
+      if (payload.from === 'display') {
+        console.log(`📩 Received vertical flip status from display: ${payload.active}`)
+        setFlipVertical(payload.active)
+      }
+    })
+
     const unsubWidth = subscribe('width', (payload) => {
       if (payload.from === 'display') {
         console.log(`📩 Received width from display: ${payload.width}`)
@@ -158,6 +171,7 @@ export default function ControllerPage() {
       unsubScroll()
       unsubVoice()
       unsubMirror()
+      unsubFlipVertical()
       unsubWidth()
     }
   }, [subscribe])
@@ -280,6 +294,13 @@ export default function ControllerPage() {
     broadcastMirror(newState)
   }
 
+  const toggleFlipVertical = () => {
+    const newState = !flipVertical
+    console.log(`↕️ Vertical flip clicked. New state: ${newState}`)
+    setFlipVertical(newState)
+    broadcastFlipVertical(newState)
+  }
+
   const handleWidthChange = (newWidth: number) => {
     const clamped = Math.min(1400, Math.max(300, newWidth))
     setScriptWidth(clamped)
@@ -290,7 +311,7 @@ export default function ControllerPage() {
     }, 80)
   }
 
-  // --- Refresh Display: tell the display to reload itself ---
+  // --- Refresh Display ---
   const handleRefreshDisplay = () => {
     console.log('🔄 Sending refresh command to display')
     send('refresh', { from: 'controller' })
@@ -338,7 +359,6 @@ export default function ControllerPage() {
                   : '▶ Play'}
           </button>
 
-          {/* Refresh Display button */}
           <button
             onClick={handleRefreshDisplay}
             title="Reload the display"
@@ -347,7 +367,6 @@ export default function ControllerPage() {
             🔄 Refresh Display
           </button>
 
-          {/* Speed control */}
           <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
             <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Speed</span>
             <button
@@ -374,7 +393,6 @@ export default function ControllerPage() {
             <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{speed.toFixed(1)}x</span>
           </div>
 
-          {/* Width control */}
           <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
             <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Width</span>
             <input
@@ -400,6 +418,7 @@ export default function ControllerPage() {
             {voiceMode ? '⏹ Stop Voice' : '🎤 Voice Track'}
           </button>
 
+          {/* Horizontal flip (mirror) */}
           <button
             onClick={toggleMirrorMode}
             className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
@@ -408,13 +427,26 @@ export default function ControllerPage() {
                 : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'
               }`}
           >
-            {mirrorMode ? '🪞 Mirror ON' : '🪞 Mirror OFF'}
+            {mirrorMode ? '↔️ Flip H ON' : '↔️ Flip H OFF'}
+          </button>
+
+          {/* Vertical flip */}
+          <button
+            onClick={toggleFlipVertical}
+            className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
+              ${flipVertical
+                ? 'bg-cyan-500/90 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'
+                : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'
+              }`}
+          >
+            {flipVertical ? '↕️ Flip V ON' : '↕️ Flip V OFF'}
           </button>
 
           <div className="flex items-center gap-2 text-xs text-white/40">
             <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-red-400'}`}></span>
             {voiceMode && <span className="text-violet-300 font-medium">Voice active</span>}
-            {mirrorMode && <span className="text-cyan-300 font-medium">Mirror active</span>}
+            {mirrorMode && <span className="text-cyan-300 font-medium">Flip H</span>}
+            {flipVertical && <span className="text-cyan-300 font-medium">Flip V</span>}
           </div>
         </div>
 
@@ -441,7 +473,12 @@ export default function ControllerPage() {
           )}
           {mirrorMode && (
             <span className="flex items-center gap-1 text-cyan-400">
-              🪞 Mirror mode active
+              ↔️ Horizontal flip active
+            </span>
+          )}
+          {flipVertical && (
+            <span className="flex items-center gap-1 text-cyan-400">
+              ↕️ Vertical flip active
             </span>
           )}
         </div>
