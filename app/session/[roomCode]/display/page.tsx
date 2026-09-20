@@ -24,8 +24,9 @@ export default function DisplayPage() {
 
   const [voiceMode, setVoiceMode] = useState(false)
   const voiceModeRef = useRef(false)
-  const [mirrorMode, setMirrorMode] = useState(false)       // horizontal flip
-  const [flipVertical, setFlipVertical] = useState(false)   // vertical flip
+  const [mirrorMode, setMirrorMode] = useState(false)
+  const [flipVertical, setFlipVertical] = useState(false)
+  const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0)
   const [scriptWidth, setScriptWidth] = useState(700)
 
   const wordsRef = useRef<string[]>([])
@@ -279,16 +280,20 @@ export default function DisplayPage() {
 
     const unsubMirror = subscribe('mirror', (payload) => {
       if (payload.from !== 'controller') return
-      const active = payload.active
-      console.log(`↔️ Display received horizontal flip: active=${active}`)
-      setMirrorMode(active)
+      console.log(`↔️ Display received horizontal flip: ${payload.active}`)
+      setMirrorMode(payload.active)
     })
 
     const unsubFlipVertical = subscribe('flipVertical', (payload) => {
       if (payload.from !== 'controller') return
-      const active = payload.active
-      console.log(`↕️ Display received vertical flip: active=${active}`)
-      setFlipVertical(active)
+      console.log(`↕️ Display received vertical flip: ${payload.active}`)
+      setFlipVertical(payload.active)
+    })
+
+    const unsubRotation = subscribe('rotation', (payload) => {
+      if (payload.from !== 'controller') return
+      console.log(`🔄 Display received rotation: ${payload.degrees}°`)
+      setRotation(payload.degrees)
     })
 
     const unsubWidth = subscribe('width', (payload) => {
@@ -310,6 +315,7 @@ export default function DisplayPage() {
       unsubVoice()
       unsubMirror()
       unsubFlipVertical()
+      unsubRotation()
       unsubWidth()
       unsubRefresh()
     }
@@ -325,8 +331,13 @@ export default function DisplayPage() {
 
   const words = wordsRef.current
 
-  // Combined flip transform
-  const flipTransform = `scaleX(${mirrorMode ? -1 : 1}) scaleY(${flipVertical ? -1 : 1})`
+  // Combined transforms
+  const flipTransform = `scaleX(${mirrorMode ? -1 : 1}) scaleY(${flipVertical ? -1 : 1}) rotate(${rotation}deg)`
+
+  // When rotated 90 or 270, the visual bounding box swaps width/height.
+  // We use a wrapper sized to the rotated bounds so the layout adapts gracefully.
+  const isSideways = rotation === 90 || rotation === 270
+  const containerHeight = 500
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex flex-col items-center justify-center p-6">
@@ -356,24 +367,26 @@ export default function DisplayPage() {
             <>
               <span className="text-xs text-white/40">|</span>
               <span className="text-xs font-medium text-violet-400 flex items-center gap-1">
-                🎤 Voice active {listening ? '🎧' : ''}
+                🎤 Voice {listening ? '🎧' : ''}
               </span>
             </>
           )}
           {mirrorMode && (
             <>
               <span className="text-xs text-white/40">|</span>
-              <span className="text-xs font-medium text-cyan-400 flex items-center gap-1">
-                ↔️ Flip H
-              </span>
+              <span className="text-xs font-medium text-cyan-400">↔️ H</span>
             </>
           )}
           {flipVertical && (
             <>
               <span className="text-xs text-white/40">|</span>
-              <span className="text-xs font-medium text-cyan-400 flex items-center gap-1">
-                ↕️ Flip V
-              </span>
+              <span className="text-xs font-medium text-cyan-400">↕️ V</span>
+            </>
+          )}
+          {rotation !== 0 && (
+            <>
+              <span className="text-xs text-white/40">|</span>
+              <span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span>
             </>
           )}
 
@@ -392,7 +405,7 @@ export default function DisplayPage() {
                 : 'bg-white/10 text-white/70 hover:bg-white/20'
               }`}
           >
-            ↔️ {mirrorMode ? 'Flip H ON' : 'Flip H OFF'}
+            ↔️ {mirrorMode ? 'H ON' : 'H OFF'}
           </button>
 
           {/* Display-side vertical flip toggle */}
@@ -408,34 +421,59 @@ export default function DisplayPage() {
                 : 'bg-white/10 text-white/70 hover:bg-white/20'
               }`}
           >
-            ↕️ {flipVertical ? 'Flip V ON' : 'Flip V OFF'}
+            ↕️ {flipVertical ? 'V ON' : 'V OFF'}
+          </button>
+
+          {/* Display-side rotate cycle button */}
+          <button
+            onClick={() => {
+              const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
+              setRotation(next)
+              send('rotation', { degrees: next, from: 'display' })
+            }}
+            className="text-xs px-3 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors"
+          >
+            🔄 {rotation}°
           </button>
         </div>
 
+        {/* Wrapper handles the layout size — it swaps dimensions when rotated 90/270 */}
         <div
-          ref={containerRef}
-          onScroll={handleScroll}
-          className="h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl"
+          className="flex items-center justify-center"
           style={{
-            width: `${scriptWidth}px`,
-            transform: flipTransform,
-            transition: 'transform 300ms ease, width 100ms ease-out',
+            width: isSideways ? `${containerHeight}px` : `${scriptWidth}px`,
+            height: isSideways ? `${scriptWidth}px` : `${containerHeight}px`,
+            transition: 'width 300ms ease, height 300ms ease',
           }}
         >
-          {words.map((word, index) => {
-            const isHighlighted = highlightedIndex !== null && Math.abs(index - highlightedIndex) <= 2
-            return (
-              <span
-                key={index}
-                data-position={index}
-                className={`transition-colors duration-200 ${
-                  isHighlighted ? 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)]' : 'text-white/90'
-                }`}
-              >
-                {word}{' '}
-              </span>
-            )
-          })}
+          <div
+            ref={containerRef}
+            onScroll={handleScroll}
+            className="bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl"
+            style={{
+              width: `${scriptWidth}px`,
+              height: `${containerHeight}px`,
+              transform: flipTransform,
+              transformOrigin: 'center center',
+              transition: 'transform 300ms ease, width 100ms ease-out',
+              flexShrink: 0,
+            }}
+          >
+            {words.map((word, index) => {
+              const isHighlighted = highlightedIndex !== null && Math.abs(index - highlightedIndex) <= 2
+              return (
+                <span
+                  key={index}
+                  data-position={index}
+                  className={`transition-colors duration-200 ${
+                    isHighlighted ? 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)]' : 'text-white/90'
+                  }`}
+                >
+                  {word}{' '}
+                </span>
+              )
+            })}
+          </div>
         </div>
       </div>
     </div>

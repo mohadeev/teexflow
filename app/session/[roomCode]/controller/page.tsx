@@ -23,8 +23,9 @@ export default function ControllerPage() {
   const speedRef = useRef(0.7)
 
   const [voiceMode, setVoiceMode] = useState(false)
-  const [mirrorMode, setMirrorMode] = useState(false)       // horizontal flip
-  const [flipVertical, setFlipVertical] = useState(false)   // vertical flip
+  const [mirrorMode, setMirrorMode] = useState(false)
+  const [flipVertical, setFlipVertical] = useState(false)
+  const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0)
 
   const [scriptWidth, setScriptWidth] = useState(700)
   const scriptWidthRef = useRef(700)
@@ -109,13 +110,18 @@ export default function ControllerPage() {
   const broadcastSpeed = (newSpeed: number) => send('speed', { speed: newSpeed })
 
   const broadcastMirror = (active: boolean) => {
-    console.log(`🪞 Sending mirror command: active=${active}`)
+    console.log(`↔️ Sending horizontal flip: active=${active}`)
     send('mirror', { active, from: 'controller' })
   }
 
   const broadcastFlipVertical = (active: boolean) => {
-    console.log(`↕️ Sending vertical flip command: active=${active}`)
+    console.log(`↕️ Sending vertical flip: active=${active}`)
     send('flipVertical', { active, from: 'controller' })
+  }
+
+  const broadcastRotation = (deg: number) => {
+    console.log(`🔄 Sending rotation: ${deg}°`)
+    send('rotation', { degrees: deg, from: 'controller' })
   }
 
   const broadcastWidth = (width: number) => {
@@ -148,15 +154,22 @@ export default function ControllerPage() {
 
     const unsubMirror = subscribe('mirror', (payload) => {
       if (payload.from === 'display') {
-        console.log(`📩 Received mirror status from display: ${payload.active}`)
+        console.log(`📩 Received horizontal flip from display: ${payload.active}`)
         setMirrorMode(payload.active)
       }
     })
 
     const unsubFlipVertical = subscribe('flipVertical', (payload) => {
       if (payload.from === 'display') {
-        console.log(`📩 Received vertical flip status from display: ${payload.active}`)
+        console.log(`📩 Received vertical flip from display: ${payload.active}`)
         setFlipVertical(payload.active)
+      }
+    })
+
+    const unsubRotation = subscribe('rotation', (payload) => {
+      if (payload.from === 'display') {
+        console.log(`📩 Received rotation from display: ${payload.degrees}°`)
+        setRotation(payload.degrees)
       }
     })
 
@@ -172,18 +185,19 @@ export default function ControllerPage() {
       unsubVoice()
       unsubMirror()
       unsubFlipVertical()
+      unsubRotation()
       unsubWidth()
     }
   }, [subscribe])
 
-  // --- Broadcast width on connect (sync initial state) ---
+  // --- Broadcast width on connect ---
   useEffect(() => {
     if (!isConnected) return
     broadcastWidth(scriptWidthRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected])
 
-  // --- Auto-scroll loop (pauses when voiceMode is true) ---
+  // --- Auto-scroll loop ---
   useEffect(() => {
     if (voiceMode) {
       if (animationRef.current) {
@@ -289,7 +303,7 @@ export default function ControllerPage() {
 
   const toggleMirrorMode = () => {
     const newState = !mirrorMode
-    console.log(`🪞 Mirror button clicked. New state: ${newState}`)
+    console.log(`↔️ Horizontal flip clicked. New state: ${newState}`)
     setMirrorMode(newState)
     broadcastMirror(newState)
   }
@@ -299,6 +313,19 @@ export default function ControllerPage() {
     console.log(`↕️ Vertical flip clicked. New state: ${newState}`)
     setFlipVertical(newState)
     broadcastFlipVertical(newState)
+  }
+
+  const cycleRotation = () => {
+    const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
+    console.log(`🔄 Rotation cycle: ${rotation}° → ${next}°`)
+    setRotation(next)
+    broadcastRotation(next)
+  }
+
+  const setRotationDirect = (deg: 0 | 90 | 180 | 270) => {
+    console.log(`🔄 Rotation set: ${deg}°`)
+    setRotation(deg)
+    broadcastRotation(deg)
   }
 
   const handleWidthChange = (newWidth: number) => {
@@ -311,7 +338,6 @@ export default function ControllerPage() {
     }, 80)
   }
 
-  // --- Refresh Display ---
   const handleRefreshDisplay = () => {
     console.log('🔄 Sending refresh command to display')
     send('refresh', { from: 'controller' })
@@ -418,7 +444,7 @@ export default function ControllerPage() {
             {voiceMode ? '⏹ Stop Voice' : '🎤 Voice Track'}
           </button>
 
-          {/* Horizontal flip (mirror) */}
+          {/* Horizontal flip */}
           <button
             onClick={toggleMirrorMode}
             className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
@@ -442,11 +468,38 @@ export default function ControllerPage() {
             {flipVertical ? '↕️ Flip V ON' : '↕️ Flip V OFF'}
           </button>
 
+          {/* Rotation control group */}
+          <div className="flex items-center gap-2 bg-white/5 rounded-full px-3 py-2 border border-white/10">
+            <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Rotate</span>
+            {([0, 90, 180, 270] as const).map((deg) => (
+              <button
+                key={deg}
+                onClick={() => setRotationDirect(deg)}
+                className={`text-xs px-2.5 py-1 rounded-full font-mono transition-colors
+                  ${rotation === deg
+                    ? 'bg-cyan-500/90 text-black shadow-lg shadow-cyan-500/20'
+                    : 'bg-white/10 text-white/70 hover:bg-white/20'
+                  }`}
+                title={`Rotate ${deg}°`}
+              >
+                {deg}°
+              </button>
+            ))}
+            <button
+              onClick={cycleRotation}
+              title="Cycle rotation"
+              className="text-xs px-2.5 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors"
+            >
+              ⟳
+            </button>
+          </div>
+
           <div className="flex items-center gap-2 text-xs text-white/40">
             <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-red-400'}`}></span>
-            {voiceMode && <span className="text-violet-300 font-medium">Voice active</span>}
+            {voiceMode && <span className="text-violet-300 font-medium">Voice</span>}
             {mirrorMode && <span className="text-cyan-300 font-medium">Flip H</span>}
             {flipVertical && <span className="text-cyan-300 font-medium">Flip V</span>}
+            {rotation !== 0 && <span className="text-cyan-300 font-medium">Rot {rotation}°</span>}
           </div>
         </div>
 
@@ -479,6 +532,11 @@ export default function ControllerPage() {
           {flipVertical && (
             <span className="flex items-center gap-1 text-cyan-400">
               ↕️ Vertical flip active
+            </span>
+          )}
+          {rotation !== 0 && (
+            <span className="flex items-center gap-1 text-cyan-400">
+              🔄 Rotated {rotation}°
             </span>
           )}
         </div>
