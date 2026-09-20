@@ -1,11 +1,20 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 
 const supabase = createClient()
+
+function splitIntoParagraphs(content: string): string[] {
+  if (!content) return []
+  let paras = content.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean)
+  if (paras.length <= 1) {
+    paras = content.split(/\n/).map((p) => p.trim()).filter(Boolean)
+  }
+  return paras
+}
 
 export default function ControllerPage() {
   const { roomCode } = useParams()
@@ -39,8 +48,13 @@ export default function ControllerPage() {
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // Track last-sent selection so we don't spam the WS
+  // --- Paragraph framing ---
+  const [paragraphMode, setParagraphMode] = useState(false)
+  const [paragraphIndex, setParagraphIndex] = useState(0)
+
   const lastSelectionRef = useRef('0:0')
+
+  const paragraphs = useMemo(() => splitIntoParagraphs(scriptContent), [scriptContent])
 
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => { scriptWidthRef.current = scriptWidth }, [scriptWidth])
@@ -55,9 +69,7 @@ export default function ControllerPage() {
           .eq('room_code', roomCode)
           .maybeSingle()
 
-        if (sessionError || !sessionData) {
-          console.error('Session not found'); setLoading(false); return
-        }
+        if (sessionError || !sessionData) { console.error('Session not found'); setLoading(false); return }
 
         scriptIdRef.current = sessionData.script_id
         setIsPlaying(sessionData.status === 'playing')
@@ -66,9 +78,7 @@ export default function ControllerPage() {
         const { data: scriptData, error: scriptError } = await supabase
           .from('scripts').select('content').eq('id', sessionData.script_id).maybeSingle()
 
-        if (scriptError || !scriptData) {
-          console.error('Script not found'); setLoading(false); return
-        }
+        if (scriptError || !scriptData) { console.error('Script not found'); setLoading(false); return }
 
         setScriptContent(scriptData.content)
         setEditContent(scriptData.content)
@@ -79,9 +89,7 @@ export default function ControllerPage() {
         }
 
         setLoading(false)
-      } catch (err) {
-        console.error('Error fetching data:', err); setLoading(false)
-      }
+      } catch (err) { console.error('Error fetching data:', err); setLoading(false) }
     }
     if (roomCode) fetchScript()
   }, [roomCode])
@@ -103,12 +111,15 @@ export default function ControllerPage() {
   const broadcastWidth = (width: number) => send('width', { width, from: 'controller' })
   const broadcastScript = (content: string) => send('script', { content, from: 'controller' })
 
-  // 👇 NEW — broadcast selection range with dedup
+  const broadcastParagraph = useCallback((mode: boolean, index: number) => {
+    console.log(`📄 Paragraph: mode=${mode} index=${index}`)
+    send('paragraph', { mode, index, from: 'controller' })
+  }, [send])
+
   const broadcastSelection = useCallback((start: number, end: number) => {
     const key = `${start}:${end}`
     if (lastSelectionRef.current === key) return
     lastSelectionRef.current = key
-    console.log(`🎯 Selection: ${start} → ${end}`)
     send('selection', { start, end, from: 'controller' })
   }, [send])
 
@@ -121,7 +132,7 @@ export default function ControllerPage() {
     setTimeout(() => { isRemoteScrollRef.current = false }, 50)
   }
 
-  // --- Subscribe to incoming WS messages ---
+  // --- Subscribe ---
   useEffect(() => {
     const unsubScroll = subscribe('scroll', (payload) => {
       if (payload.from === 'controller') return
@@ -148,44 +159,38 @@ export default function ControllerPage() {
         setEditContent(payload.content)
       }
     })
+    const unsubParagraph = subscribe('paragraph', (payload) => {
+      if (payload.from !== 'display') return
+      setParagraphMode(payload.mode)
+      setParagraphIndex(payload.index)
+    })
 
     return () => {
       unsubScroll(); unsubVoice(); unsubMirror(); unsubFlipVertical()
-      unsubRotation(); unsubWidth(); unsubScript()
+      unsubRotation(); unsubWidth(); unsubScript(); unsubParagraph()
     }
   }, [subscribe])
 
-  // --- Broadcast width on connect ---
   useEffect(() => {
     if (!isConnected) return
     broadcastWidth(scriptWidthRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected])
 
-  // --- View-mode selection listener (non-editing container) ---
+  // --- View-mode selection listener ---
   useEffect(() => {
     if (isEditing) return
-
     const handler = () => {
       const container = containerRef.current
       if (!container) return
-
       const sel = window.getSelection()
-      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
-        broadcastSelection(0, 0)
-        return
-      }
-
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) { broadcastSelection(0, 0); return }
       const range = sel.getRangeAt(0)
       if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) {
-        broadcastSelection(0, 0)
-        return
+        broadcastSelection(0, 0); return
       }
-
       const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
-      let charPos = 0
-      let start = -1
-      let end = -1
+      let charPos = 0, start = -1, end = -1
       let node = walker.nextNode()
       while (node) {
         const len = node.textContent?.length ?? 0
@@ -198,14 +203,13 @@ export default function ControllerPage() {
       if (start === -1 || end === -1) return
       broadcastSelection(Math.min(start, end), Math.max(start, end))
     }
-
     document.addEventListener('selectionchange', handler)
     return () => document.removeEventListener('selectionchange', handler)
   }, [isEditing, broadcastSelection])
 
   // --- Auto-scroll loop ---
   useEffect(() => {
-    if (voiceMode) {
+    if (voiceMode || paragraphMode) {
       if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
@@ -213,7 +217,6 @@ export default function ControllerPage() {
       if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
-
     const container = containerRef.current
     if (!container) return
 
@@ -221,15 +224,11 @@ export default function ControllerPage() {
     const step = (time: number) => {
       const delta = (time - lastTime) / 1000
       lastTime = time
-
-      const currentSpeed = speedRef.current
       const maxScroll = container.scrollHeight - container.clientHeight
-      const newScroll = Math.min(container.scrollTop + delta * currentSpeed * 60, maxScroll)
+      const newScroll = Math.min(container.scrollTop + delta * speedRef.current * 60, maxScroll)
       container.scrollTop = newScroll
-
       broadcastScroll(getScrollPercentage())
       supabase.from('sessions').update({ scroll_percentage: getScrollPercentage() }).eq('room_code', roomCode)
-
       if (newScroll >= maxScroll) {
         hasReachedBottomRef.current = true
         setIsPlaying(false)
@@ -245,7 +244,7 @@ export default function ControllerPage() {
     return () => {
       if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
     }
-  }, [isPlaying, loading, voiceMode, isEditing])
+  }, [isPlaying, loading, voiceMode, isEditing, paragraphMode])
 
   const handleScroll = () => {
     if (isRemoteScrollRef.current) return
@@ -253,7 +252,7 @@ export default function ControllerPage() {
   }
 
   const togglePlay = () => {
-    if (voiceMode || isEditing) return
+    if (voiceMode || isEditing || paragraphMode) return
     if (hasReachedBottomRef.current) {
       if (containerRef.current) containerRef.current.scrollTop = 0
       hasReachedBottomRef.current = false
@@ -279,19 +278,13 @@ export default function ControllerPage() {
     }
   }
 
-  const toggleMirrorMode = () => {
-    const s = !mirrorMode; setMirrorMode(s); broadcastMirror(s)
-  }
-  const toggleFlipVertical = () => {
-    const s = !flipVertical; setFlipVertical(s); broadcastFlipVertical(s)
-  }
+  const toggleMirrorMode = () => { const s = !mirrorMode; setMirrorMode(s); broadcastMirror(s) }
+  const toggleFlipVertical = () => { const s = !flipVertical; setFlipVertical(s); broadcastFlipVertical(s) }
   const cycleRotation = () => {
     const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
     setRotation(next); broadcastRotation(next)
   }
-  const setRotationDirect = (deg: 0 | 90 | 180 | 270) => {
-    setRotation(deg); broadcastRotation(deg)
-  }
+  const setRotationDirect = (deg: 0 | 90 | 180 | 270) => { setRotation(deg); broadcastRotation(deg) }
 
   const handleWidthChange = (newWidth: number) => {
     const clamped = Math.min(1400, Math.max(300, newWidth))
@@ -302,12 +295,36 @@ export default function ControllerPage() {
 
   const handleRefreshDisplay = () => send('refresh', { from: 'controller' })
 
+  // --- Paragraph navigation ---
+  const toggleParagraphMode = () => {
+    const newMode = !paragraphMode
+    const newIndex = newMode ? 0 : paragraphIndex
+    setParagraphMode(newMode)
+    setParagraphIndex(newIndex)
+    broadcastParagraph(newMode, newIndex)
+    if (newMode && isPlaying) {
+      setIsPlaying(false)
+      broadcastControl('pause')
+    }
+    if (newMode) broadcastSelection(0, 0)
+  }
+
+  const goParagraph = (idx: number) => {
+    const clamped = Math.max(0, Math.min(idx, Math.max(paragraphs.length - 1, 0)))
+    setParagraphIndex(clamped)
+    broadcastParagraph(paragraphMode, clamped)
+  }
+
+  const goPrevParagraph = () => goParagraph(paragraphIndex - 1)
+  const goNextParagraph = () => goParagraph(paragraphIndex + 1)
+
+  // --- Editing ---
   const handleEnterEdit = () => {
     if (isPlaying) { setIsPlaying(false); broadcastControl('pause') }
     setEditContent(scriptContent)
     setSaveError(null)
     setIsEditing(true)
-    broadcastSelection(0, 0)  // clear highlight when entering edit
+    broadcastSelection(0, 0)
   }
 
   const handleEditChange = (newContent: string) => {
@@ -316,7 +333,6 @@ export default function ControllerPage() {
     editDebounceRef.current = setTimeout(() => broadcastScript(newContent), 150)
   }
 
-  // Textarea selection → broadcast
   const handleTextareaSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
     const ta = e.currentTarget
     broadcastSelection(ta.selectionStart, ta.selectionEnd)
@@ -347,12 +363,15 @@ export default function ControllerPage() {
     setScriptContent(content)
     setLastSavedAt(new Date())
     setIsEditing(false)
-    broadcastSelection(0, 0)  // clear highlight
+    broadcastSelection(0, 0)
 
     if (containerRef.current) containerRef.current.scrollTop = 0
     await supabase.from('sessions').update({ scroll_percentage: 0 }).eq('room_code', roomCode)
     broadcastScript(content)
     broadcastScroll(0)
+
+    setParagraphIndex(0)
+    broadcastParagraph(paragraphMode, 0)
   }
 
   const handleCancelEdit = async () => {
@@ -388,15 +407,19 @@ export default function ControllerPage() {
         .custom-scrollbar::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.03); border-radius: 10px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 10px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
+        .paragraph-scroll::-webkit-scrollbar { width: 6px; }
+        .paragraph-scroll::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.03); border-radius: 10px; }
+        .paragraph-scroll::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.4); border-radius: 10px; }
+        .paragraph-scroll::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.6); }
       `}</style>
 
-      <div className="flex flex-col items-center w-full max-w-6xl gap-6">
+      <div className="flex flex-col items-center w-full max-w-7xl gap-6">
         <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex flex-wrap items-center justify-center gap-4">
           <button
             onClick={togglePlay}
-            disabled={voiceMode || isEditing}
+            disabled={voiceMode || isEditing || paragraphMode}
             className={`group relative px-6 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 
-              ${voiceMode || isEditing
+              ${voiceMode || isEditing || paragraphMode
                 ? 'bg-neutral-700 text-neutral-300 cursor-not-allowed'
                 : isPlaying
                   ? 'bg-amber-500/90 text-black hover:bg-amber-400 shadow-lg shadow-amber-500/20'
@@ -407,6 +430,7 @@ export default function ControllerPage() {
           >
             {voiceMode ? '🔒 Voice Lock'
               : isEditing ? '✏️ Editing'
+              : paragraphMode ? '📄 Framed'
               : isPlaying ? '⏸ Pause'
               : hasReachedBottomRef.current ? '🔄 Restart'
               : '▶ Play'}
@@ -419,10 +443,22 @@ export default function ControllerPage() {
             🔄 Refresh Display
           </button>
 
+          <button
+            onClick={toggleParagraphMode}
+            disabled={isEditing}
+            className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 disabled:opacity-50
+              ${paragraphMode
+                ? 'bg-indigo-500/90 text-white hover:bg-indigo-400 shadow-lg shadow-indigo-500/20'
+                : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'}`}
+          >
+            📄 {paragraphMode ? 'Paragraph ON' : 'Paragraph OFF'}
+          </button>
+
           {!isEditing ? (
             <button
               onClick={handleEnterEdit}
-              className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-fuchsia-600/90 text-white hover:bg-fuchsia-500 shadow-lg shadow-fuchsia-500/20"
+              disabled={paragraphMode}
+              className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-fuchsia-600/90 text-white hover:bg-fuchsia-500 shadow-lg shadow-fuchsia-500/20 disabled:opacity-50"
             >
               ✏️ Edit Script
             </button>
@@ -515,6 +551,7 @@ export default function ControllerPage() {
             {mirrorMode && <span className="text-cyan-300 font-medium">Flip H</span>}
             {flipVertical && <span className="text-cyan-300 font-medium">Flip V</span>}
             {rotation !== 0 && <span className="text-cyan-300 font-medium">Rot {rotation}°</span>}
+            {paragraphMode && <span className="text-indigo-300 font-medium">Paragraph</span>}
             {isEditing && <span className="text-fuchsia-300 font-medium animate-pulse">Editing…</span>}
             {saving && <span className="text-emerald-300 font-medium">Saving…</span>}
             {!saving && !saveError && lastSavedAt && (
@@ -524,6 +561,7 @@ export default function ControllerPage() {
           </div>
         </div>
 
+        {/* ==================== MAIN AREA ==================== */}
         {isEditing ? (
           <textarea
             value={editContent}
@@ -535,7 +573,91 @@ export default function ControllerPage() {
             placeholder="Type or paste your script here..."
             spellCheck={false}
           />
+        ) : paragraphMode ? (
+          /* ============ PARAGRAPH MODE WITH SIDEBAR ============ */
+          <div className="flex gap-4 items-start" style={{ width: '100%', maxWidth: '1200px' }}>
+            {/* Sidebar — paragraph list */}
+            <aside className="w-72 shrink-0 bg-neutral-900/80 backdrop-blur-sm border border-indigo-500/30 rounded-2xl shadow-2xl flex flex-col overflow-hidden" style={{ height: '500px' }}>
+              <div className="px-4 py-3 border-b border-indigo-500/20 flex items-center justify-between bg-indigo-500/5">
+                <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">
+                  Paragraphs
+                </span>
+                <span className="text-xs font-mono text-white/50">
+                  {paragraphs.length}
+                </span>
+              </div>
+              <div className="paragraph-scroll flex-1 overflow-y-auto p-2 space-y-1">
+                {paragraphs.length === 0 ? (
+                  <div className="text-xs text-white/30 italic p-4 text-center">
+                    No paragraphs found. Add line breaks in the script.
+                  </div>
+                ) : (
+                  paragraphs.map((p, i) => {
+                    const active = i === paragraphIndex
+                    const preview = p.length > 60 ? p.slice(0, 60) + '…' : p
+                    return (
+                      <button
+                        key={i}
+                        onClick={() => goParagraph(i)}
+                        className={`w-full text-left px-3 py-2.5 rounded-lg transition-all duration-150 group
+                          ${active
+                            ? 'bg-indigo-500/30 border border-indigo-400/50 shadow-lg shadow-indigo-500/10'
+                            : 'bg-white/[0.02] border border-transparent hover:bg-white/[0.06] hover:border-white/10'
+                          }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          <span className={`text-xs font-mono shrink-0 mt-0.5 ${active ? 'text-indigo-300 font-bold' : 'text-white/40'}`}>
+                            {String(i + 1).padStart(2, '0')}
+                          </span>
+                          <span className={`text-xs leading-snug line-clamp-2 ${active ? 'text-white' : 'text-white/60'}`}>
+                            {preview}
+                          </span>
+                        </div>
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </aside>
+
+            {/* Main preview */}
+            <div className="flex-1 flex flex-col items-center gap-4">
+              {/* Nav row */}
+              <div className="flex items-center gap-3 bg-white/5 backdrop-blur rounded-full px-4 py-2 border border-indigo-500/30">
+                <button
+                  onClick={goPrevParagraph}
+                  disabled={paragraphIndex === 0}
+                  className="text-sm px-3 py-1 rounded-full bg-white/10 text-white hover:bg-white/20 disabled:opacity-30 transition-colors"
+                  title="Previous"
+                >
+                  ⬅️
+                </button>
+                <span className="text-xs font-mono text-indigo-300 min-w-[5rem] text-center">
+                  {paragraphs.length === 0 ? '0 / 0' : `${paragraphIndex + 1} / ${paragraphs.length}`}
+                </span>
+                <button
+                  onClick={goNextParagraph}
+                  disabled={paragraphIndex >= paragraphs.length - 1}
+                  className="text-sm px-3 py-1 rounded-full bg-white/10 text-white hover:bg-white/20 disabled:opacity-30 transition-colors"
+                  title="Next"
+                >
+                  ➡️
+                </button>
+              </div>
+
+              {/* Paragraph preview */}
+              <div
+                className="bg-neutral-900/80 backdrop-blur-sm border border-indigo-500/40 rounded-2xl p-10 text-white leading-relaxed shadow-2xl whitespace-pre-wrap overflow-y-auto flex items-center justify-center"
+                style={{ width: `${scriptWidth}px`, height: '450px', transition: 'width 100ms ease-out' }}
+              >
+                <p className="text-center text-2xl font-light">
+                  {paragraphs[paragraphIndex] || <span className="text-white/30">No paragraph</span>}
+                </p>
+              </div>
+            </div>
+          </div>
         ) : (
+          /* ============ NORMAL SCROLL VIEW ============ */
           <div
             ref={containerRef}
             onScroll={handleScroll}
@@ -549,6 +671,7 @@ export default function ControllerPage() {
         <div className="flex items-center gap-4 text-xs text-white/30">
           <span>
             {isEditing ? '✏️ Editing — select text to highlight on display'
+              : paragraphMode ? `📄 Paragraph ${paragraphIndex + 1} of ${paragraphs.length} — click a paragraph in the sidebar to activate`
               : isPlaying ? '● Auto‑scrolling — select text to highlight on display'
               : '⏸ Paused — select text to highlight on display'}
           </span>
@@ -556,6 +679,7 @@ export default function ControllerPage() {
           {mirrorMode && <span className="text-cyan-400">↔️ Horizontal flip active</span>}
           {flipVertical && <span className="text-cyan-400">↕️ Vertical flip active</span>}
           {rotation !== 0 && <span className="text-cyan-400">🔄 Rotated {rotation}°</span>}
+          {paragraphMode && <span className="text-indigo-400">📄 Framed by paragraph</span>}
         </div>
       </div>
     </div>
