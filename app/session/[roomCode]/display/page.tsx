@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
@@ -29,6 +29,7 @@ export default function DisplayPage() {
   const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0)
   const [scriptWidth, setScriptWidth] = useState(700)
 
+  // Pure words list for voice matching (no whitespace)
   const wordsRef = useRef<string[]>([])
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
 
@@ -39,15 +40,10 @@ export default function DisplayPage() {
     browserSupportsSpeechRecognition,
   } = useSpeechRecognition()
 
-  useEffect(() => {
-    speedRef.current = speed
-  }, [speed])
+  useEffect(() => { speedRef.current = speed }, [speed])
+  useEffect(() => { voiceModeRef.current = voiceMode }, [voiceMode])
 
-  useEffect(() => {
-    voiceModeRef.current = voiceMode
-  }, [voiceMode])
-
-  // --- Fetch script and prepare word list ---
+  // --- Fetch script ---
   useEffect(() => {
     const fetchScript = async () => {
       try {
@@ -59,8 +55,7 @@ export default function DisplayPage() {
 
         if (sessionError || !sessionData) {
           console.error('❌ Session not found')
-          setLoading(false)
-          return
+          setLoading(false); return
         }
 
         setIsPlaying(sessionData.status === 'playing')
@@ -74,8 +69,7 @@ export default function DisplayPage() {
 
         if (scriptError || !scriptData) {
           console.error('❌ Script not found')
-          setLoading(false)
-          return
+          setLoading(false); return
         }
 
         setScriptContent(scriptData.content)
@@ -97,7 +91,25 @@ export default function DisplayPage() {
     if (roomCode) fetchScript()
   }, [roomCode])
 
-  // --- Broadcast helpers ---
+  // --- Tokenize the script preserving whitespace, but assign word indices for highlighting ---
+  const tokens = useMemo(() => {
+    if (!scriptContent) return [] as { text: string; wordIndex: number | null }[]
+    // Split into runs of whitespace and runs of non-whitespace
+    const parts = scriptContent.split(/(\s+)/)
+    let wIdx = 0
+    const result: { text: string; wordIndex: number | null }[] = []
+    for (const part of parts) {
+      if (part === '') continue
+      if (/^\s+$/.test(part)) {
+        result.push({ text: part, wordIndex: null })
+      } else {
+        result.push({ text: part, wordIndex: wIdx })
+        wIdx++
+      }
+    }
+    return result
+  }, [scriptContent])
+
   const getScrollPercentage = () => {
     if (!containerRef.current) return 0
     const container = containerRef.current
@@ -121,29 +133,23 @@ export default function DisplayPage() {
     setTimeout(() => { isRemoteScrollRef.current = false }, 50)
   }, [])
 
-  // --- Voice recognition ---
   const startVoiceTracking = useCallback(() => {
     if (!browserSupportsSpeechRecognition) {
       alert('Your browser does not support speech recognition.')
       return
     }
-    console.log('🎤 Display: Starting microphone...')
     SpeechRecognition.startListening({ continuous: true, language: 'en-US' })
   }, [browserSupportsSpeechRecognition])
 
   const stopVoiceTracking = useCallback(() => {
-    console.log('🎤 Display: Stopping microphone...')
     SpeechRecognition.stopListening()
     setHighlightedIndex(null)
   }, [])
 
-  // --- Process transcript ---
   useEffect(() => {
     if (!voiceMode || !transcript || transcript.trim() === '') return
 
     const heard = transcript.trim().toLowerCase()
-    console.log('🗣️ Display heard:', heard)
-
     const scriptWords = wordsRef.current
     if (scriptWords.length === 0) return
 
@@ -153,7 +159,6 @@ export default function DisplayPage() {
       const idx = scriptWords.findIndex((w) => w.toLowerCase() === word)
       if (idx !== -1) { matchedIndex = idx; break }
     }
-
     if (matchedIndex === -1) {
       for (const word of spokenWords) {
         const idx = scriptWords.findIndex((w) => w.toLowerCase().includes(word))
@@ -162,10 +167,7 @@ export default function DisplayPage() {
     }
 
     if (matchedIndex !== -1) {
-      const matchedWord = scriptWords[matchedIndex]
-      console.log(`🎯 Matched word: "${matchedWord}" at position ${matchedIndex + 1}`)
       setHighlightedIndex(matchedIndex)
-
       const totalWords = scriptWords.length
       const percentage = (matchedIndex / totalWords) * 100
       if (containerRef.current) {
@@ -174,13 +176,9 @@ export default function DisplayPage() {
         const target = (percentage / 100) * maxScroll
         container.scrollTop = target
         broadcastScroll(percentage)
-        supabase
-          .from('sessions')
-          .update({ scroll_percentage: percentage })
-          .eq('room_code', roomCode)
+        supabase.from('sessions').update({ scroll_percentage: percentage }).eq('room_code', roomCode)
       }
     } else {
-      console.log('❌ No matching word found.')
       setHighlightedIndex(null)
     }
 
@@ -190,18 +188,11 @@ export default function DisplayPage() {
   // --- Auto-scroll loop ---
   useEffect(() => {
     if (voiceMode) {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
-        animationRef.current = null
-      }
+      if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
-
     if (!isPlaying || loading) {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
-        animationRef.current = null
-      }
+      if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
 
@@ -209,7 +200,6 @@ export default function DisplayPage() {
     if (!container) return
 
     let lastTime = performance.now()
-
     const step = (time: number) => {
       const delta = (time - lastTime) / 1000
       lastTime = time
@@ -220,13 +210,10 @@ export default function DisplayPage() {
       if (newScroll > maxScroll) newScroll = maxScroll
       container.scrollTop = newScroll
 
-      const percentage = getScrollPercentage()
-      broadcastScroll(percentage)
+      broadcastScroll(getScrollPercentage())
 
       if (newScroll >= maxScroll) {
-        setIsPlaying(false)
-        animationRef.current = null
-        return
+        setIsPlaying(false); animationRef.current = null; return
       }
 
       animationRef.current = requestAnimationFrame(step)
@@ -235,17 +222,13 @@ export default function DisplayPage() {
     animationRef.current = requestAnimationFrame(step)
 
     return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
-        animationRef.current = null
-      }
+      if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
     }
   }, [isPlaying, loading, voiceMode, broadcastScroll])
 
   const handleScroll = () => {
     if (isRemoteScrollRef.current) return
-    const percentage = getScrollPercentage()
-    broadcastScroll(percentage)
+    broadcastScroll(getScrollPercentage())
   }
 
   // --- Subscribe to WS messages ---
@@ -253,71 +236,62 @@ export default function DisplayPage() {
     const unsubScroll = subscribe('scroll', (payload) => {
       if (payload.from !== 'display') applyScroll(payload.percentage)
     })
-
     const unsubSpeed = subscribe('speed', (payload) => {
-      setSpeed(payload.speed)
-      speedRef.current = payload.speed
+      setSpeed(payload.speed); speedRef.current = payload.speed
     })
-
     const unsubControl = subscribe('control', (payload) => {
       if (payload.action === 'play') setIsPlaying(true)
       else if (payload.action === 'pause') setIsPlaying(false)
     })
-
     const unsubVoice = subscribe('voice', (payload) => {
       if (payload.from !== 'controller') return
       const active = payload.active
-      console.log(`📩 Display received voice command: active=${active}`)
-
-      if (active && !voiceModeRef.current) {
-        setVoiceMode(true)
-        startVoiceTracking()
-      } else if (!active && voiceModeRef.current) {
-        setVoiceMode(false)
-        stopVoiceTracking()
-      }
+      if (active && !voiceModeRef.current) { setVoiceMode(true); startVoiceTracking() }
+      else if (!active && voiceModeRef.current) { setVoiceMode(false); stopVoiceTracking() }
     })
-
     const unsubMirror = subscribe('mirror', (payload) => {
       if (payload.from !== 'controller') return
-      console.log(`↔️ Display received horizontal flip: ${payload.active}`)
       setMirrorMode(payload.active)
     })
-
     const unsubFlipVertical = subscribe('flipVertical', (payload) => {
       if (payload.from !== 'controller') return
-      console.log(`↕️ Display received vertical flip: ${payload.active}`)
       setFlipVertical(payload.active)
     })
-
     const unsubRotation = subscribe('rotation', (payload) => {
       if (payload.from !== 'controller') return
-      console.log(`🔄 Display received rotation: ${payload.degrees}°`)
       setRotation(payload.degrees)
     })
-
     const unsubWidth = subscribe('width', (payload) => {
       if (payload.from !== 'controller') return
-      console.log(`📩 Display received width: ${payload.width}`)
       setScriptWidth(payload.width)
+    })
+
+    // Live script update from controller
+    const unsubScript = subscribe('script', (payload) => {
+      if (payload.from !== 'controller') return
+      const currentPct = getScrollPercentage()
+
+      setScriptContent(payload.content)
+      wordsRef.current = payload.content.split(/\s+/).filter((w: string) => w.length > 0)
+      setHighlightedIndex(null)
+
+      requestAnimationFrame(() => {
+        if (containerRef.current) {
+          const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
+          containerRef.current.scrollTop = (currentPct / 100) * maxScroll
+        }
+      })
     })
 
     const unsubRefresh = subscribe('refresh', (payload) => {
       if (payload.from !== 'controller') return
-      console.log('🔄 Display received refresh command — reloading...')
       window.location.reload()
     })
 
     return () => {
-      unsubScroll()
-      unsubSpeed()
-      unsubControl()
-      unsubVoice()
-      unsubMirror()
-      unsubFlipVertical()
-      unsubRotation()
-      unsubWidth()
-      unsubRefresh()
+      unsubScroll(); unsubSpeed(); unsubControl(); unsubVoice()
+      unsubMirror(); unsubFlipVertical(); unsubRotation(); unsubWidth()
+      unsubScript(); unsubRefresh()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
@@ -329,13 +303,7 @@ export default function DisplayPage() {
     )
   }
 
-  const words = wordsRef.current
-
-  // Combined transforms
   const flipTransform = `scaleX(${mirrorMode ? -1 : 1}) scaleY(${flipVertical ? -1 : 1}) rotate(${rotation}deg)`
-
-  // When rotated 90 or 270, the visual bounding box swaps width/height.
-  // We use a wrapper sized to the rotated bounds so the layout adapts gracefully.
   const isSideways = rotation === 90 || rotation === 270
   const containerHeight = 500
 
@@ -363,36 +331,13 @@ export default function DisplayPage() {
           <span className="text-xs font-mono text-cyan-300">Speed: {speed.toFixed(2)}x</span>
           <span className="text-xs text-white/40">|</span>
           <span className="text-xs font-mono text-cyan-300">Width: {scriptWidth}px</span>
-          {voiceMode && (
-            <>
-              <span className="text-xs text-white/40">|</span>
-              <span className="text-xs font-medium text-violet-400 flex items-center gap-1">
-                🎤 Voice {listening ? '🎧' : ''}
-              </span>
-            </>
-          )}
-          {mirrorMode && (
-            <>
-              <span className="text-xs text-white/40">|</span>
-              <span className="text-xs font-medium text-cyan-400">↔️ H</span>
-            </>
-          )}
-          {flipVertical && (
-            <>
-              <span className="text-xs text-white/40">|</span>
-              <span className="text-xs font-medium text-cyan-400">↕️ V</span>
-            </>
-          )}
-          {rotation !== 0 && (
-            <>
-              <span className="text-xs text-white/40">|</span>
-              <span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span>
-            </>
-          )}
+          {voiceMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-violet-400">🎤 Voice {listening ? '🎧' : ''}</span></>)}
+          {mirrorMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↔️ H</span></>)}
+          {flipVertical && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↕️ V</span></>)}
+          {rotation !== 0 && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span></>)}
 
           <span className="text-xs text-white/40">|</span>
 
-          {/* Display-side horizontal flip toggle */}
           <button
             onClick={() => {
               const newState = !mirrorMode
@@ -400,15 +345,11 @@ export default function DisplayPage() {
               send('mirror', { active: newState, from: 'display' })
             }}
             className={`text-xs px-3 py-1 rounded-full transition-colors
-              ${mirrorMode
-                ? 'bg-cyan-500/80 text-black hover:bg-cyan-400'
-                : 'bg-white/10 text-white/70 hover:bg-white/20'
-              }`}
+              ${mirrorMode ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
           >
             ↔️ {mirrorMode ? 'H ON' : 'H OFF'}
           </button>
 
-          {/* Display-side vertical flip toggle */}
           <button
             onClick={() => {
               const newState = !flipVertical
@@ -416,15 +357,11 @@ export default function DisplayPage() {
               send('flipVertical', { active: newState, from: 'display' })
             }}
             className={`text-xs px-3 py-1 rounded-full transition-colors
-              ${flipVertical
-                ? 'bg-cyan-500/80 text-black hover:bg-cyan-400'
-                : 'bg-white/10 text-white/70 hover:bg-white/20'
-              }`}
+              ${flipVertical ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
           >
             ↕️ {flipVertical ? 'V ON' : 'V OFF'}
           </button>
 
-          {/* Display-side rotate cycle button */}
           <button
             onClick={() => {
               const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
@@ -437,7 +374,6 @@ export default function DisplayPage() {
           </button>
         </div>
 
-        {/* Wrapper handles the layout size — it swaps dimensions when rotated 90/270 */}
         <div
           className="flex items-center justify-center"
           style={{
@@ -449,7 +385,8 @@ export default function DisplayPage() {
           <div
             ref={containerRef}
             onScroll={handleScroll}
-            className="bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl"
+            /* 👇 whitespace-pre-wrap preserves newlines + spaces */
+            className="bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl whitespace-pre-wrap"
             style={{
               width: `${scriptWidth}px`,
               height: `${containerHeight}px`,
@@ -459,17 +396,21 @@ export default function DisplayPage() {
               flexShrink: 0,
             }}
           >
-            {words.map((word, index) => {
-              const isHighlighted = highlightedIndex !== null && Math.abs(index - highlightedIndex) <= 2
+            {tokens.map((token, i) => {
+              const isHighlighted =
+                token.wordIndex !== null &&
+                highlightedIndex !== null &&
+                Math.abs(token.wordIndex - highlightedIndex) <= 2
               return (
                 <span
-                  key={index}
-                  data-position={index}
+                  key={i}
                   className={`transition-colors duration-200 ${
-                    isHighlighted ? 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)]' : 'text-white/90'
+                    isHighlighted
+                      ? 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)]'
+                      : 'text-white/90'
                   }`}
                 >
-                  {word}{' '}
+                  {token.text}
                 </span>
               )
             })}
