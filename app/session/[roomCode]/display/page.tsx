@@ -8,6 +8,12 @@ import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognitio
 
 const supabase = createClient()
 
+type Segment = {
+  text: string
+  wordIndex: number | null
+  selected: boolean
+}
+
 export default function DisplayPage() {
   const { roomCode } = useParams()
   const [scriptContent, setScriptContent] = useState<string>('')
@@ -29,15 +35,14 @@ export default function DisplayPage() {
   const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0)
   const [scriptWidth, setScriptWidth] = useState(700)
 
-  // Pure words list for voice matching (no whitespace)
+  // 👇 NEW — remote selection range from controller
+  const [remoteSelection, setRemoteSelection] = useState<{ start: number; end: number } | null>(null)
+
   const wordsRef = useRef<string[]>([])
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
 
   const {
-    transcript,
-    listening,
-    resetTranscript,
-    browserSupportsSpeechRecognition,
+    transcript, listening, resetTranscript, browserSupportsSpeechRecognition,
   } = useSpeechRecognition()
 
   useEffect(() => { speedRef.current = speed }, [speed])
@@ -53,69 +58,74 @@ export default function DisplayPage() {
           .eq('room_code', roomCode)
           .maybeSingle()
 
-        if (sessionError || !sessionData) {
-          console.error('❌ Session not found')
-          setLoading(false); return
-        }
+        if (sessionError || !sessionData) { console.error('❌ Session not found'); setLoading(false); return }
 
         setIsPlaying(sessionData.status === 'playing')
         setSpeed(0.7)
 
         const { data: scriptData, error: scriptError } = await supabase
-          .from('scripts')
-          .select('content')
-          .eq('id', sessionData.script_id)
-          .maybeSingle()
+          .from('scripts').select('content').eq('id', sessionData.script_id).maybeSingle()
 
-        if (scriptError || !scriptData) {
-          console.error('❌ Script not found')
-          setLoading(false); return
-        }
+        if (scriptError || !scriptData) { console.error('❌ Script not found'); setLoading(false); return }
 
         setScriptContent(scriptData.content)
         wordsRef.current = scriptData.content.split(/\s+/).filter((w: string) => w.length > 0)
 
         if (containerRef.current && sessionData.scroll_percentage) {
           const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
-          const target = (sessionData.scroll_percentage / 100) * maxScroll
-          containerRef.current.scrollTop = target
+          containerRef.current.scrollTop = (sessionData.scroll_percentage / 100) * maxScroll
         }
 
         setLoading(false)
       } catch (err) {
-        console.error('❌ Error fetching data:', err)
-        setLoading(false)
+        console.error('❌ Error fetching data:', err); setLoading(false)
       }
     }
-
     if (roomCode) fetchScript()
   }, [roomCode])
 
-  // --- Tokenize the script preserving whitespace, but assign word indices for highlighting ---
-  const tokens = useMemo(() => {
-    if (!scriptContent) return [] as { text: string; wordIndex: number | null }[]
-    // Split into runs of whitespace and runs of non-whitespace
+  // --- Tokenize preserving whitespace AND selection + word indexes ---
+  const segments = useMemo<Segment[]>(() => {
+    if (!scriptContent) return []
     const parts = scriptContent.split(/(\s+)/)
+    const out: Segment[] = []
     let wIdx = 0
-    const result: { text: string; wordIndex: number | null }[] = []
+    let charPos = 0
+    const sel = remoteSelection
+    const hasSel = !!sel && sel.end > sel.start
+
     for (const part of parts) {
       if (part === '') continue
-      if (/^\s+$/.test(part)) {
-        result.push({ text: part, wordIndex: null })
+      const tokenStart = charPos
+      const tokenEnd = charPos + part.length
+      charPos = tokenEnd
+      const isWhitespace = /^\s+$/.test(part)
+      const thisWordIndex = isWhitespace ? null : wIdx
+
+      const overlaps = hasSel && tokenStart < sel!.end && tokenEnd > sel!.start
+      if (!overlaps) {
+        out.push({ text: part, wordIndex: thisWordIndex, selected: false })
       } else {
-        result.push({ text: part, wordIndex: wIdx })
-        wIdx++
+        const oStart = Math.max(tokenStart, sel!.start)
+        const oEnd = Math.min(tokenEnd, sel!.end)
+        const before = part.slice(0, oStart - tokenStart)
+        const middle = part.slice(oStart - tokenStart, oEnd - tokenStart)
+        const after = part.slice(oEnd - tokenStart)
+        if (before) out.push({ text: before, wordIndex: thisWordIndex, selected: false })
+        if (middle) out.push({ text: middle, wordIndex: thisWordIndex, selected: true })
+        if (after) out.push({ text: after, wordIndex: thisWordIndex, selected: false })
       }
+
+      if (!isWhitespace) wIdx++
     }
-    return result
-  }, [scriptContent])
+    return out
+  }, [scriptContent, remoteSelection])
 
   const getScrollPercentage = () => {
     if (!containerRef.current) return 0
-    const container = containerRef.current
-    const maxScroll = container.scrollHeight - container.clientHeight
-    if (maxScroll <= 0) return 0
-    return (container.scrollTop / maxScroll) * 100
+    const c = containerRef.current
+    const maxScroll = c.scrollHeight - c.clientHeight
+    return maxScroll <= 0 ? 0 : (c.scrollTop / maxScroll) * 100
   }
 
   const broadcastScroll = useCallback(
@@ -125,30 +135,27 @@ export default function DisplayPage() {
 
   const applyScroll = useCallback((percentage: number) => {
     if (!containerRef.current) return
-    const container = containerRef.current
-    const maxScroll = container.scrollHeight - container.clientHeight
-    const target = (percentage / 100) * maxScroll
+    const c = containerRef.current
+    const maxScroll = c.scrollHeight - c.clientHeight
     isRemoteScrollRef.current = true
-    container.scrollTop = target
+    c.scrollTop = (percentage / 100) * maxScroll
     setTimeout(() => { isRemoteScrollRef.current = false }, 50)
   }, [])
 
   const startVoiceTracking = useCallback(() => {
     if (!browserSupportsSpeechRecognition) {
-      alert('Your browser does not support speech recognition.')
-      return
+      alert('Your browser does not support speech recognition.'); return
     }
     SpeechRecognition.startListening({ continuous: true, language: 'en-US' })
   }, [browserSupportsSpeechRecognition])
 
   const stopVoiceTracking = useCallback(() => {
-    SpeechRecognition.stopListening()
-    setHighlightedIndex(null)
+    SpeechRecognition.stopListening(); setHighlightedIndex(null)
   }, [])
 
+  // --- Transcript processing ---
   useEffect(() => {
     if (!voiceMode || !transcript || transcript.trim() === '') return
-
     const heard = transcript.trim().toLowerCase()
     const scriptWords = wordsRef.current
     if (scriptWords.length === 0) return
@@ -168,20 +175,17 @@ export default function DisplayPage() {
 
     if (matchedIndex !== -1) {
       setHighlightedIndex(matchedIndex)
-      const totalWords = scriptWords.length
-      const percentage = (matchedIndex / totalWords) * 100
+      const percentage = (matchedIndex / scriptWords.length) * 100
       if (containerRef.current) {
-        const container = containerRef.current
-        const maxScroll = container.scrollHeight - container.clientHeight
-        const target = (percentage / 100) * maxScroll
-        container.scrollTop = target
+        const c = containerRef.current
+        const maxScroll = c.scrollHeight - c.clientHeight
+        c.scrollTop = (percentage / 100) * maxScroll
         broadcastScroll(percentage)
         supabase.from('sessions').update({ scroll_percentage: percentage }).eq('room_code', roomCode)
       }
     } else {
       setHighlightedIndex(null)
     }
-
     resetTranscript()
   }, [transcript, voiceMode, broadcastScroll, resetTranscript, roomCode])
 
@@ -195,7 +199,6 @@ export default function DisplayPage() {
       if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
-
     const container = containerRef.current
     if (!container) return
 
@@ -203,22 +206,14 @@ export default function DisplayPage() {
     const step = (time: number) => {
       const delta = (time - lastTime) / 1000
       lastTime = time
-
-      const currentSpeed = speedRef.current
       const maxScroll = container.scrollHeight - container.clientHeight
-      let newScroll = container.scrollTop + delta * currentSpeed * 60
+      let newScroll = container.scrollTop + delta * speedRef.current * 60
       if (newScroll > maxScroll) newScroll = maxScroll
       container.scrollTop = newScroll
-
       broadcastScroll(getScrollPercentage())
-
-      if (newScroll >= maxScroll) {
-        setIsPlaying(false); animationRef.current = null; return
-      }
-
+      if (newScroll >= maxScroll) { setIsPlaying(false); animationRef.current = null; return }
       animationRef.current = requestAnimationFrame(step)
     }
-
     animationRef.current = requestAnimationFrame(step)
 
     return () => {
@@ -266,21 +261,30 @@ export default function DisplayPage() {
       setScriptWidth(payload.width)
     })
 
-    // Live script update from controller
     const unsubScript = subscribe('script', (payload) => {
       if (payload.from !== 'controller') return
       const currentPct = getScrollPercentage()
-
       setScriptContent(payload.content)
       wordsRef.current = payload.content.split(/\s+/).filter((w: string) => w.length > 0)
       setHighlightedIndex(null)
-
+      setRemoteSelection(null)  // clear highlight when script changes
       requestAnimationFrame(() => {
         if (containerRef.current) {
           const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
           containerRef.current.scrollTop = (currentPct / 100) * maxScroll
         }
       })
+    })
+
+    // 👇 NEW — remote selection from controller
+    const unsubSelection = subscribe('selection', (payload) => {
+      if (payload.from !== 'controller') return
+      const { start, end } = payload
+      if (!start && !end) {
+        setRemoteSelection(null)
+      } else {
+        setRemoteSelection({ start, end })
+      }
     })
 
     const unsubRefresh = subscribe('refresh', (payload) => {
@@ -291,7 +295,7 @@ export default function DisplayPage() {
     return () => {
       unsubScroll(); unsubSpeed(); unsubControl(); unsubVoice()
       unsubMirror(); unsubFlipVertical(); unsubRotation(); unsubWidth()
-      unsubScript(); unsubRefresh()
+      unsubScript(); unsubSelection(); unsubRefresh()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
@@ -335,43 +339,33 @@ export default function DisplayPage() {
           {mirrorMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↔️ H</span></>)}
           {flipVertical && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↕️ V</span></>)}
           {rotation !== 0 && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span></>)}
+          {remoteSelection && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-red-400">🎯 Highlight</span></>)}
 
           <span className="text-xs text-white/40">|</span>
 
           <button
             onClick={() => {
-              const newState = !mirrorMode
-              setMirrorMode(newState)
-              send('mirror', { active: newState, from: 'display' })
+              const s = !mirrorMode; setMirrorMode(s); send('mirror', { active: s, from: 'display' })
             }}
             className={`text-xs px-3 py-1 rounded-full transition-colors
               ${mirrorMode ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
-          >
-            ↔️ {mirrorMode ? 'H ON' : 'H OFF'}
-          </button>
+          >↔️ {mirrorMode ? 'H ON' : 'H OFF'}</button>
 
           <button
             onClick={() => {
-              const newState = !flipVertical
-              setFlipVertical(newState)
-              send('flipVertical', { active: newState, from: 'display' })
+              const s = !flipVertical; setFlipVertical(s); send('flipVertical', { active: s, from: 'display' })
             }}
             className={`text-xs px-3 py-1 rounded-full transition-colors
               ${flipVertical ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
-          >
-            ↕️ {flipVertical ? 'V ON' : 'V OFF'}
-          </button>
+          >↕️ {flipVertical ? 'V ON' : 'V OFF'}</button>
 
           <button
             onClick={() => {
               const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
-              setRotation(next)
-              send('rotation', { degrees: next, from: 'display' })
+              setRotation(next); send('rotation', { degrees: next, from: 'display' })
             }}
             className="text-xs px-3 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors"
-          >
-            🔄 {rotation}°
-          </button>
+          >🔄 {rotation}°</button>
         </div>
 
         <div
@@ -385,7 +379,6 @@ export default function DisplayPage() {
           <div
             ref={containerRef}
             onScroll={handleScroll}
-            /* 👇 whitespace-pre-wrap preserves newlines + spaces */
             className="bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl whitespace-pre-wrap"
             style={{
               width: `${scriptWidth}px`,
@@ -396,23 +389,23 @@ export default function DisplayPage() {
               flexShrink: 0,
             }}
           >
-            {tokens.map((token, i) => {
-              const isHighlighted =
-                token.wordIndex !== null &&
+            {segments.map((seg, i) => {
+              const voiceHighlighted =
+                !seg.selected &&
+                seg.wordIndex !== null &&
                 highlightedIndex !== null &&
-                Math.abs(token.wordIndex - highlightedIndex) <= 2
-              return (
-                <span
-                  key={i}
-                  className={`transition-colors duration-200 ${
-                    isHighlighted
-                      ? 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)]'
-                      : 'text-white/90'
-                  }`}
-                >
-                  {token.text}
-                </span>
-              )
+                Math.abs(seg.wordIndex - highlightedIndex) <= 2
+
+              let cls = 'transition-colors duration-200 '
+              if (seg.selected) {
+                cls += 'bg-red-500/60 text-red-50 rounded-[3px] '
+              } else if (voiceHighlighted) {
+                cls += 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)] '
+              } else {
+                cls += 'text-white/90 '
+              }
+
+              return <span key={i} className={cls}>{seg.text}</span>
             })}
           </div>
         </div>

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { useWebSocket } from '@/hooks/useWebSocket'
@@ -39,9 +39,13 @@ export default function ControllerPage() {
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
+  // Track last-sent selection so we don't spam the WS
+  const lastSelectionRef = useRef('0:0')
+
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => { scriptWidthRef.current = scriptWidth }, [scriptWidth])
 
+  // --- Fetch script ---
   useEffect(() => {
     const fetchScript = async () => {
       try {
@@ -52,27 +56,18 @@ export default function ControllerPage() {
           .maybeSingle()
 
         if (sessionError || !sessionData) {
-          console.error('Session not found')
-          setLoading(false)
-          return
+          console.error('Session not found'); setLoading(false); return
         }
 
         scriptIdRef.current = sessionData.script_id
-        console.log('📌 Loaded session, script_id =', sessionData.script_id)
-
         setIsPlaying(sessionData.status === 'playing')
         setSpeed(0.7)
 
         const { data: scriptData, error: scriptError } = await supabase
-          .from('scripts')
-          .select('content')
-          .eq('id', sessionData.script_id)
-          .maybeSingle()
+          .from('scripts').select('content').eq('id', sessionData.script_id).maybeSingle()
 
         if (scriptError || !scriptData) {
-          console.error('Script not found')
-          setLoading(false)
-          return
+          console.error('Script not found'); setLoading(false); return
         }
 
         setScriptContent(scriptData.content)
@@ -80,31 +75,25 @@ export default function ControllerPage() {
 
         if (containerRef.current && sessionData.scroll_percentage) {
           const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
-          const target = (sessionData.scroll_percentage / 100) * maxScroll
-          containerRef.current.scrollTop = target
+          containerRef.current.scrollTop = (sessionData.scroll_percentage / 100) * maxScroll
         }
 
         setLoading(false)
       } catch (err) {
-        console.error('Error fetching data:', err)
-        setLoading(false)
+        console.error('Error fetching data:', err); setLoading(false)
       }
     }
-
     if (roomCode) fetchScript()
   }, [roomCode])
 
   const getScrollPercentage = () => {
     if (!containerRef.current) return 0
-    const container = containerRef.current
-    const maxScroll = container.scrollHeight - container.clientHeight
-    if (maxScroll <= 0) return 0
-    return (container.scrollTop / maxScroll) * 100
+    const c = containerRef.current
+    const maxScroll = c.scrollHeight - c.clientHeight
+    return maxScroll <= 0 ? 0 : (c.scrollTop / maxScroll) * 100
   }
 
-  const broadcastScroll = (percentage: number) =>
-    send('scroll', { percentage, from: 'controller' })
-
+  const broadcastScroll = (percentage: number) => send('scroll', { percentage, from: 'controller' })
   const broadcastControl = (action: string) => send('control', { action })
   const broadcastVoice = (active: boolean) => send('voice', { active, from: 'controller' })
   const broadcastSpeed = (newSpeed: number) => send('speed', { speed: newSpeed })
@@ -112,22 +101,27 @@ export default function ControllerPage() {
   const broadcastFlipVertical = (active: boolean) => send('flipVertical', { active, from: 'controller' })
   const broadcastRotation = (deg: number) => send('rotation', { degrees: deg, from: 'controller' })
   const broadcastWidth = (width: number) => send('width', { width, from: 'controller' })
+  const broadcastScript = (content: string) => send('script', { content, from: 'controller' })
 
-  const broadcastScript = (content: string) => {
-    console.log(`📝 Broadcasting live preview (${content.length} chars)`)
-    send('script', { content, from: 'controller' })
-  }
+  // 👇 NEW — broadcast selection range with dedup
+  const broadcastSelection = useCallback((start: number, end: number) => {
+    const key = `${start}:${end}`
+    if (lastSelectionRef.current === key) return
+    lastSelectionRef.current = key
+    console.log(`🎯 Selection: ${start} → ${end}`)
+    send('selection', { start, end, from: 'controller' })
+  }, [send])
 
   const applyScroll = (percentage: number) => {
     if (!containerRef.current) return
-    const container = containerRef.current
-    const maxScroll = container.scrollHeight - container.clientHeight
-    const target = (percentage / 100) * maxScroll
+    const c = containerRef.current
+    const maxScroll = c.scrollHeight - c.clientHeight
     isRemoteScrollRef.current = true
-    container.scrollTop = target
+    c.scrollTop = (percentage / 100) * maxScroll
     setTimeout(() => { isRemoteScrollRef.current = false }, 50)
   }
 
+  // --- Subscribe to incoming WS messages ---
   useEffect(() => {
     const unsubScroll = subscribe('scroll', (payload) => {
       if (payload.from === 'controller') return
@@ -161,25 +155,62 @@ export default function ControllerPage() {
     }
   }, [subscribe])
 
+  // --- Broadcast width on connect ---
   useEffect(() => {
     if (!isConnected) return
     broadcastWidth(scriptWidthRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected])
 
+  // --- View-mode selection listener (non-editing container) ---
+  useEffect(() => {
+    if (isEditing) return
+
+    const handler = () => {
+      const container = containerRef.current
+      if (!container) return
+
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+        broadcastSelection(0, 0)
+        return
+      }
+
+      const range = sel.getRangeAt(0)
+      if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) {
+        broadcastSelection(0, 0)
+        return
+      }
+
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+      let charPos = 0
+      let start = -1
+      let end = -1
+      let node = walker.nextNode()
+      while (node) {
+        const len = node.textContent?.length ?? 0
+        if (node === range.startContainer) start = charPos + range.startOffset
+        if (node === range.endContainer) end = charPos + range.endOffset
+        if (start !== -1 && end !== -1) break
+        charPos += len
+        node = walker.nextNode()
+      }
+      if (start === -1 || end === -1) return
+      broadcastSelection(Math.min(start, end), Math.max(start, end))
+    }
+
+    document.addEventListener('selectionchange', handler)
+    return () => document.removeEventListener('selectionchange', handler)
+  }, [isEditing, broadcastSelection])
+
+  // --- Auto-scroll loop ---
   useEffect(() => {
     if (voiceMode) {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
-        animationRef.current = null
-      }
+      if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
     if (!isPlaying || hasReachedBottomRef.current || loading || isEditing) {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
-        animationRef.current = null
-      }
+      if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
 
@@ -187,7 +218,6 @@ export default function ControllerPage() {
     if (!container) return
 
     let lastTime = performance.now()
-
     const step = (time: number) => {
       const delta = (time - lastTime) / 1000
       lastTime = time
@@ -197,10 +227,8 @@ export default function ControllerPage() {
       const newScroll = Math.min(container.scrollTop + delta * currentSpeed * 60, maxScroll)
       container.scrollTop = newScroll
 
-      const percentage = getScrollPercentage()
-      broadcastScroll(percentage)
-
-      supabase.from('sessions').update({ scroll_percentage: percentage }).eq('room_code', roomCode)
+      broadcastScroll(getScrollPercentage())
+      supabase.from('sessions').update({ scroll_percentage: getScrollPercentage() }).eq('room_code', roomCode)
 
       if (newScroll >= maxScroll) {
         hasReachedBottomRef.current = true
@@ -210,17 +238,12 @@ export default function ControllerPage() {
         animationRef.current = null
         return
       }
-
       animationRef.current = requestAnimationFrame(step)
     }
-
     animationRef.current = requestAnimationFrame(step)
 
     return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current)
-        animationRef.current = null
-      }
+      if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
     }
   }, [isPlaying, loading, voiceMode, isEditing])
 
@@ -243,43 +266,31 @@ export default function ControllerPage() {
 
   const handleSpeedChange = (newSpeed: number) => {
     const clampedSpeed = Math.min(5, Math.max(0.1, newSpeed))
-    setSpeed(clampedSpeed)
-    speedRef.current = clampedSpeed
+    setSpeed(clampedSpeed); speedRef.current = clampedSpeed
     broadcastSpeed(clampedSpeed)
   }
 
   const toggleVoiceMode = () => {
     const newState = !voiceMode
-    setVoiceMode(newState)
-    broadcastVoice(newState)
+    setVoiceMode(newState); broadcastVoice(newState)
     if (newState && isPlaying) {
-      setIsPlaying(false)
-      broadcastControl('pause')
+      setIsPlaying(false); broadcastControl('pause')
       supabase.from('sessions').update({ status: 'paused' }).eq('room_code', roomCode)
     }
   }
 
   const toggleMirrorMode = () => {
-    const newState = !mirrorMode
-    setMirrorMode(newState)
-    broadcastMirror(newState)
+    const s = !mirrorMode; setMirrorMode(s); broadcastMirror(s)
   }
-
   const toggleFlipVertical = () => {
-    const newState = !flipVertical
-    setFlipVertical(newState)
-    broadcastFlipVertical(newState)
+    const s = !flipVertical; setFlipVertical(s); broadcastFlipVertical(s)
   }
-
   const cycleRotation = () => {
     const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
-    setRotation(next)
-    broadcastRotation(next)
+    setRotation(next); broadcastRotation(next)
   }
-
   const setRotationDirect = (deg: 0 | 90 | 180 | 270) => {
-    setRotation(deg)
-    broadcastRotation(deg)
+    setRotation(deg); broadcastRotation(deg)
   }
 
   const handleWidthChange = (newWidth: number) => {
@@ -292,13 +303,11 @@ export default function ControllerPage() {
   const handleRefreshDisplay = () => send('refresh', { from: 'controller' })
 
   const handleEnterEdit = () => {
-    if (isPlaying) {
-      setIsPlaying(false)
-      broadcastControl('pause')
-    }
+    if (isPlaying) { setIsPlaying(false); broadcastControl('pause') }
     setEditContent(scriptContent)
     setSaveError(null)
     setIsEditing(true)
+    broadcastSelection(0, 0)  // clear highlight when entering edit
   }
 
   const handleEditChange = (newContent: string) => {
@@ -307,21 +316,22 @@ export default function ControllerPage() {
     editDebounceRef.current = setTimeout(() => broadcastScript(newContent), 150)
   }
 
+  // Textarea selection → broadcast
+  const handleTextareaSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget
+    broadcastSelection(ta.selectionStart, ta.selectionEnd)
+  }
+
   const handleSaveScript = async () => {
     if (!scriptIdRef.current) {
-      const msg = 'Cannot save: script ID not loaded. Try refreshing the page.'
+      const msg = 'Cannot save: script ID not loaded.'
       setSaveError(msg); alert(msg); return
     }
-
     const content = editContent
-    console.log(`💾 Saving — id: ${scriptIdRef.current}, length: ${content.length}`)
     setSaving(true); setSaveError(null)
 
     const { data, error } = await supabase
-      .from('scripts')
-      .update({ content })
-      .eq('id', scriptIdRef.current)
-      .select('id, content')
+      .from('scripts').update({ content }).eq('id', scriptIdRef.current).select('id, content')
 
     setSaving(false)
 
@@ -329,20 +339,18 @@ export default function ControllerPage() {
       const msg = `Supabase error: ${error.message}`
       setSaveError(msg); alert(`❌ Failed to save\n\n${msg}`); return
     }
-
     if (!data || data.length === 0) {
       const msg = 'Update matched 0 rows — check RLS policy on "scripts" table.'
       setSaveError(msg); alert(`❌ Script was NOT saved.\n\n${msg}`); return
     }
 
-    console.log('✅ Script saved:', data[0])
     setScriptContent(content)
     setLastSavedAt(new Date())
     setIsEditing(false)
+    broadcastSelection(0, 0)  // clear highlight
 
     if (containerRef.current) containerRef.current.scrollTop = 0
     await supabase.from('sessions').update({ scroll_percentage: 0 }).eq('room_code', roomCode)
-
     broadcastScript(content)
     broadcastScroll(0)
   }
@@ -353,15 +361,16 @@ export default function ControllerPage() {
       const { data } = await supabase
         .from('scripts').select('content').eq('id', scriptIdRef.current).maybeSingle()
       if (data?.content) {
-        setScriptContent(data.content)
-        setEditContent(data.content)
+        setScriptContent(data.content); setEditContent(data.content)
         broadcastScript(data.content)
-        setIsEditing(false); setSaveError(null); return
+        setIsEditing(false); setSaveError(null)
+        broadcastSelection(0, 0)
+        return
       }
     }
-    setEditContent(scriptContent)
-    broadcastScript(scriptContent)
+    setEditContent(scriptContent); broadcastScript(scriptContent)
     setIsEditing(false); setSaveError(null)
+    broadcastSelection(0, 0)
   }
 
   if (loading) {
@@ -519,17 +528,18 @@ export default function ControllerPage() {
           <textarea
             value={editContent}
             onChange={(e) => handleEditChange(e.target.value)}
+            onSelect={handleTextareaSelect}
+            onBlur={() => broadcastSelection(0, 0)}
             className="h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-fuchsia-500/40 rounded-2xl p-8 text-white text-lg leading-relaxed custom-scrollbar shadow-2xl resize-none focus:outline-none focus:border-fuchsia-400/70"
             style={{ width: `${scriptWidth}px`, transition: 'width 100ms ease-out' }}
             placeholder="Type or paste your script here..."
             spellCheck={false}
           />
         ) : (
-          /* 👇 whitespace-pre-wrap preserves newlines + spaces */
           <div
             ref={containerRef}
             onScroll={handleScroll}
-            className="h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-white text-xl leading-relaxed custom-scrollbar shadow-2xl whitespace-pre-wrap"
+            className="h-[500px] bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-white text-xl leading-relaxed custom-scrollbar shadow-2xl whitespace-pre-wrap select-text cursor-text"
             style={{ width: `${scriptWidth}px`, transition: 'width 100ms ease-out' }}
           >
             {scriptContent}
@@ -538,8 +548,9 @@ export default function ControllerPage() {
 
         <div className="flex items-center gap-4 text-xs text-white/30">
           <span>
-            {isEditing ? '✏️ Editing — live preview on display. Click 💾 Save to persist.'
-              : isPlaying ? '● Auto‑scrolling' : '⏸ Paused'}
+            {isEditing ? '✏️ Editing — select text to highlight on display'
+              : isPlaying ? '● Auto‑scrolling — select text to highlight on display'
+              : '⏸ Paused — select text to highlight on display'}
           </span>
           {voiceMode && <span className="text-violet-400">🎤 Voice tracking active</span>}
           {mirrorMode && <span className="text-cyan-400">↔️ Horizontal flip active</span>}
