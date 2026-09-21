@@ -7,13 +7,62 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 
 const supabase = createClient()
 
-function splitIntoParagraphs(content: string): string[] {
+/**
+ * Split a script into ~300-word chunks, breaking at sentence boundaries
+ * so chunks end cleanly. Falls back to whitespace boundary if no punctuation.
+ */
+function splitIntoParagraphs(content: string, targetWords = 300): string[] {
   if (!content) return []
-  let paras = content.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean)
-  if (paras.length <= 1) {
-    paras = content.split(/\n/).map((p) => p.trim()).filter(Boolean)
+
+  // 1. Normalize and split into sentences
+  const normalized = content.replace(/\r\n/g, '\n').trim()
+  const sentences = normalized.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [normalized]
+
+  const paragraphs: string[] = []
+  let buffer = ''
+  let bufferWordCount = 0
+
+  const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
+
+  for (const sentence of sentences) {
+    const sentWords = countWords(sentence)
+
+    // A single sentence is longer than the target — hard-split by words
+    if (sentWords > targetWords) {
+      if (buffer.trim()) {
+        paragraphs.push(buffer.trim())
+        buffer = ''
+        bufferWordCount = 0
+      }
+      const words = sentence.trim().split(/\s+/)
+      for (let i = 0; i < words.length; i += targetWords) {
+        paragraphs.push(words.slice(i, i + targetWords).join(' '))
+      }
+      continue
+    }
+
+    // Adding this sentence would exceed the target → flush first
+    if (bufferWordCount + sentWords > targetWords && buffer.trim()) {
+      paragraphs.push(buffer.trim())
+      buffer = ''
+      bufferWordCount = 0
+    }
+
+    buffer += (buffer ? ' ' : '') + sentence.trim()
+    bufferWordCount += sentWords
   }
-  return paras
+
+  if (buffer.trim()) paragraphs.push(buffer.trim())
+
+  // Edge case: no sentences matched → fall back to plain word chunking
+  if (paragraphs.length === 0) {
+    const words = normalized.split(/\s+/).filter(Boolean)
+    for (let i = 0; i < words.length; i += targetWords) {
+      paragraphs.push(words.slice(i, i + targetWords).join(' '))
+    }
+  }
+
+  return paragraphs
 }
 
 export default function ControllerPage() {
@@ -48,13 +97,12 @@ export default function ControllerPage() {
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // --- Paragraph framing ---
   const [paragraphMode, setParagraphMode] = useState(false)
   const [paragraphIndex, setParagraphIndex] = useState(0)
 
   const lastSelectionRef = useRef('0:0')
 
-  const paragraphs = useMemo(() => splitIntoParagraphs(scriptContent), [scriptContent])
+  const paragraphs = useMemo(() => splitIntoParagraphs(scriptContent, 300), [scriptContent])
 
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => { scriptWidthRef.current = scriptWidth }, [scriptWidth])
@@ -177,7 +225,7 @@ export default function ControllerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected])
 
-  // --- View-mode selection listener ---
+  // --- Selection listener ---
   useEffect(() => {
     if (isEditing) return
     const handler = () => {
@@ -561,7 +609,6 @@ export default function ControllerPage() {
           </div>
         </div>
 
-        {/* ==================== MAIN AREA ==================== */}
         {isEditing ? (
           <textarea
             value={editContent}
@@ -574,9 +621,7 @@ export default function ControllerPage() {
             spellCheck={false}
           />
         ) : paragraphMode ? (
-          /* ============ PARAGRAPH MODE WITH SIDEBAR ============ */
           <div className="flex gap-4 items-start" style={{ width: '100%', maxWidth: '1200px' }}>
-            {/* Sidebar — paragraph list */}
             <aside className="w-72 shrink-0 bg-neutral-900/80 backdrop-blur-sm border border-indigo-500/30 rounded-2xl shadow-2xl flex flex-col overflow-hidden" style={{ height: '500px' }}>
               <div className="px-4 py-3 border-b border-indigo-500/20 flex items-center justify-between bg-indigo-500/5">
                 <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">
@@ -589,12 +634,13 @@ export default function ControllerPage() {
               <div className="paragraph-scroll flex-1 overflow-y-auto p-2 space-y-1">
                 {paragraphs.length === 0 ? (
                   <div className="text-xs text-white/30 italic p-4 text-center">
-                    No paragraphs found. Add line breaks in the script.
+                    No paragraphs found.
                   </div>
                 ) : (
                   paragraphs.map((p, i) => {
                     const active = i === paragraphIndex
-                    const preview = p.length > 60 ? p.slice(0, 60) + '…' : p
+                    const wordCount = p.split(/\s+/).filter(Boolean).length
+                    const preview = p.length > 90 ? p.slice(0, 90) + '…' : p
                     return (
                       <button
                         key={i}
@@ -609,9 +655,14 @@ export default function ControllerPage() {
                           <span className={`text-xs font-mono shrink-0 mt-0.5 ${active ? 'text-indigo-300 font-bold' : 'text-white/40'}`}>
                             {String(i + 1).padStart(2, '0')}
                           </span>
-                          <span className={`text-xs leading-snug line-clamp-2 ${active ? 'text-white' : 'text-white/60'}`}>
-                            {preview}
-                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-xs leading-snug line-clamp-2 mb-1 ${active ? 'text-white' : 'text-white/60'}`}>
+                              {preview}
+                            </div>
+                            <div className={`text-[10px] font-mono ${active ? 'text-indigo-300/70' : 'text-white/30'}`}>
+                              {wordCount} words
+                            </div>
+                          </div>
                         </div>
                       </button>
                     )
@@ -620,9 +671,7 @@ export default function ControllerPage() {
               </div>
             </aside>
 
-            {/* Main preview */}
             <div className="flex-1 flex flex-col items-center gap-4">
-              {/* Nav row */}
               <div className="flex items-center gap-3 bg-white/5 backdrop-blur rounded-full px-4 py-2 border border-indigo-500/30">
                 <button
                   onClick={goPrevParagraph}
@@ -645,19 +694,17 @@ export default function ControllerPage() {
                 </button>
               </div>
 
-              {/* Paragraph preview */}
               <div
-                className="bg-neutral-900/80 backdrop-blur-sm border border-indigo-500/40 rounded-2xl p-10 text-white leading-relaxed shadow-2xl whitespace-pre-wrap overflow-y-auto flex items-center justify-center"
+                className="bg-neutral-900/80 backdrop-blur-sm border border-indigo-500/40 rounded-2xl p-10 text-white leading-relaxed shadow-2xl whitespace-pre-wrap overflow-y-auto"
                 style={{ width: `${scriptWidth}px`, height: '450px', transition: 'width 100ms ease-out' }}
               >
-                <p className="text-center text-2xl font-light">
+                <p className="text-xl font-light leading-relaxed">
                   {paragraphs[paragraphIndex] || <span className="text-white/30">No paragraph</span>}
                 </p>
               </div>
             </div>
           </div>
         ) : (
-          /* ============ NORMAL SCROLL VIEW ============ */
           <div
             ref={containerRef}
             onScroll={handleScroll}
@@ -671,7 +718,7 @@ export default function ControllerPage() {
         <div className="flex items-center gap-4 text-xs text-white/30">
           <span>
             {isEditing ? '✏️ Editing — select text to highlight on display'
-              : paragraphMode ? `📄 Paragraph ${paragraphIndex + 1} of ${paragraphs.length} — click a paragraph in the sidebar to activate`
+              : paragraphMode ? `📄 Paragraph ${paragraphIndex + 1} of ${paragraphs.length} (~300 words each) — click a paragraph in the sidebar to activate`
               : isPlaying ? '● Auto‑scrolling — select text to highlight on display'
               : '⏸ Paused — select text to highlight on display'}
           </span>

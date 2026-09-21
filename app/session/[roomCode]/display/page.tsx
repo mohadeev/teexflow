@@ -14,6 +14,60 @@ type Segment = {
   selected: boolean
 }
 
+/**
+ * Split a script into ~300-word chunks, breaking at sentence boundaries
+ * so chunks end cleanly. Falls back to whitespace boundary if no punctuation.
+ */
+function splitIntoParagraphs(content: string, targetWords = 300): string[] {
+  if (!content) return []
+
+  const normalized = content.replace(/\r\n/g, '\n').trim()
+  const sentences = normalized.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [normalized]
+
+  const paragraphs: string[] = []
+  let buffer = ''
+  let bufferWordCount = 0
+
+  const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
+
+  for (const sentence of sentences) {
+    const sentWords = countWords(sentence)
+
+    if (sentWords > targetWords) {
+      if (buffer.trim()) {
+        paragraphs.push(buffer.trim())
+        buffer = ''
+        bufferWordCount = 0
+      }
+      const words = sentence.trim().split(/\s+/)
+      for (let i = 0; i < words.length; i += targetWords) {
+        paragraphs.push(words.slice(i, i + targetWords).join(' '))
+      }
+      continue
+    }
+
+    if (bufferWordCount + sentWords > targetWords && buffer.trim()) {
+      paragraphs.push(buffer.trim())
+      buffer = ''
+      bufferWordCount = 0
+    }
+
+    buffer += (buffer ? ' ' : '') + sentence.trim()
+    bufferWordCount += sentWords
+  }
+
+  if (buffer.trim()) paragraphs.push(buffer.trim())
+
+  if (paragraphs.length === 0) {
+    const words = normalized.split(/\s+/).filter(Boolean)
+    for (let i = 0; i < words.length; i += targetWords) {
+      paragraphs.push(words.slice(i, i + targetWords).join(' '))
+    }
+  }
+
+  return paragraphs
+}
+
 export default function DisplayPage() {
   const { roomCode } = useParams()
   const [scriptContent, setScriptContent] = useState<string>('')
@@ -35,8 +89,10 @@ export default function DisplayPage() {
   const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0)
   const [scriptWidth, setScriptWidth] = useState(700)
 
-  // 👇 NEW — remote selection range from controller
   const [remoteSelection, setRemoteSelection] = useState<{ start: number; end: number } | null>(null)
+
+  const [paragraphMode, setParagraphMode] = useState(false)
+  const [paragraphIndex, setParagraphIndex] = useState(0)
 
   const wordsRef = useRef<string[]>([])
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
@@ -77,14 +133,25 @@ export default function DisplayPage() {
         }
 
         setLoading(false)
-      } catch (err) {
-        console.error('❌ Error fetching data:', err); setLoading(false)
-      }
+      } catch (err) { console.error('❌ Error fetching data:', err); setLoading(false) }
     }
     if (roomCode) fetchScript()
   }, [roomCode])
 
-  // --- Tokenize preserving whitespace AND selection + word indexes ---
+  // --- Paragraph data ---
+  const paragraphs = useMemo(() => splitIntoParagraphs(scriptContent, 300), [scriptContent])
+
+  const paragraphWordRanges = useMemo(() => {
+    let counter = 0
+    return paragraphs.map((p) => {
+      const count = p.split(/\s+/).filter((w) => w.length > 0).length
+      const range = { start: counter, end: counter + count, count }
+      counter += count
+      return range
+    })
+  }, [paragraphs])
+
+  // --- Segments for normal view ---
   const segments = useMemo<Segment[]>(() => {
     if (!scriptContent) return []
     const parts = scriptContent.split(/(\s+)/)
@@ -175,23 +242,34 @@ export default function DisplayPage() {
 
     if (matchedIndex !== -1) {
       setHighlightedIndex(matchedIndex)
-      const percentage = (matchedIndex / scriptWords.length) * 100
-      if (containerRef.current) {
-        const c = containerRef.current
-        const maxScroll = c.scrollHeight - c.clientHeight
-        c.scrollTop = (percentage / 100) * maxScroll
-        broadcastScroll(percentage)
-        supabase.from('sessions').update({ scroll_percentage: percentage }).eq('room_code', roomCode)
+
+      if (paragraphMode) {
+        for (let i = 0; i < paragraphWordRanges.length; i++) {
+          const r = paragraphWordRanges[i]
+          if (matchedIndex >= r.start && matchedIndex < r.end) {
+            if (i !== paragraphIndex) setParagraphIndex(i)
+            break
+          }
+        }
+      } else {
+        const percentage = (matchedIndex / scriptWords.length) * 100
+        if (containerRef.current) {
+          const c = containerRef.current
+          const maxScroll = c.scrollHeight - c.clientHeight
+          c.scrollTop = (percentage / 100) * maxScroll
+          broadcastScroll(percentage)
+          supabase.from('sessions').update({ scroll_percentage: percentage }).eq('room_code', roomCode)
+        }
       }
     } else {
       setHighlightedIndex(null)
     }
     resetTranscript()
-  }, [transcript, voiceMode, broadcastScroll, resetTranscript, roomCode])
+  }, [transcript, voiceMode, broadcastScroll, resetTranscript, roomCode, paragraphMode, paragraphIndex, paragraphWordRanges])
 
   // --- Auto-scroll loop ---
   useEffect(() => {
-    if (voiceMode) {
+    if (voiceMode || paragraphMode) {
       if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
       return
     }
@@ -219,14 +297,15 @@ export default function DisplayPage() {
     return () => {
       if (animationRef.current) { cancelAnimationFrame(animationRef.current); animationRef.current = null }
     }
-  }, [isPlaying, loading, voiceMode, broadcastScroll])
+  }, [isPlaying, loading, voiceMode, broadcastScroll, paragraphMode])
 
   const handleScroll = () => {
     if (isRemoteScrollRef.current) return
+    if (paragraphMode) return
     broadcastScroll(getScrollPercentage())
   }
 
-  // --- Subscribe to WS messages ---
+  // --- Subscribe ---
   useEffect(() => {
     const unsubScroll = subscribe('scroll', (payload) => {
       if (payload.from !== 'display') applyScroll(payload.percentage)
@@ -267,7 +346,7 @@ export default function DisplayPage() {
       setScriptContent(payload.content)
       wordsRef.current = payload.content.split(/\s+/).filter((w: string) => w.length > 0)
       setHighlightedIndex(null)
-      setRemoteSelection(null)  // clear highlight when script changes
+      setRemoteSelection(null)
       requestAnimationFrame(() => {
         if (containerRef.current) {
           const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
@@ -276,15 +355,18 @@ export default function DisplayPage() {
       })
     })
 
-    // 👇 NEW — remote selection from controller
     const unsubSelection = subscribe('selection', (payload) => {
       if (payload.from !== 'controller') return
       const { start, end } = payload
-      if (!start && !end) {
-        setRemoteSelection(null)
-      } else {
-        setRemoteSelection({ start, end })
-      }
+      if (!start && !end) setRemoteSelection(null)
+      else setRemoteSelection({ start, end })
+    })
+
+    const unsubParagraph = subscribe('paragraph', (payload) => {
+      if (payload.from !== 'controller') return
+      setParagraphMode(payload.mode)
+      setParagraphIndex(payload.index)
+      if (payload.mode) setRemoteSelection(null)
     })
 
     const unsubRefresh = subscribe('refresh', (payload) => {
@@ -295,7 +377,7 @@ export default function DisplayPage() {
     return () => {
       unsubScroll(); unsubSpeed(); unsubControl(); unsubVoice()
       unsubMirror(); unsubFlipVertical(); unsubRotation(); unsubWidth()
-      unsubScript(); unsubSelection(); unsubRefresh()
+      unsubScript(); unsubSelection(); unsubParagraph(); unsubRefresh()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
@@ -310,7 +392,67 @@ export default function DisplayPage() {
   const flipTransform = `scaleX(${mirrorMode ? -1 : 1}) scaleY(${flipVertical ? -1 : 1}) rotate(${rotation}deg)`
   const isSideways = rotation === 90 || rotation === 270
   const containerHeight = 500
+  const hasSelection = !!remoteSelection && remoteSelection.end > remoteSelection.start
 
+  const currentParagraphText = paragraphs[paragraphIndex] ?? ''
+  const currentRange = paragraphWordRanges[paragraphIndex] ?? { start: 0, end: 0, count: 0 }
+  const currentParagraphWords = currentParagraphText.split(/\s+/).filter((w) => w.length > 0)
+
+  // ========== DISTRACTION-FREE PARAGRAPH VIEW ==========
+  if (paragraphMode) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex items-center justify-center p-4 overflow-hidden">
+        <div
+          className="w-full h-[90vh] flex items-center justify-center"
+          style={{
+            transform: flipTransform,
+            transformOrigin: 'center center',
+            transition: 'transform 300ms ease',
+          }}
+        >
+          <p
+            className="text-center text-5xl md:text-6xl lg:text-7xl font-light leading-tight text-white/95 whitespace-pre-wrap max-w-[1400px]"
+            style={{
+              width: `${scriptWidth}px`,
+              maxWidth: '90vw',
+            }}
+          >
+            {currentParagraphWords.length === 0 ? (
+              <span className="text-white/20">—</span>
+            ) : (
+              currentParagraphWords.map((word, i) => {
+                const globalIdx = currentRange.start + i
+                const voiceHighlighted =
+                  highlightedIndex !== null &&
+                  Math.abs(globalIdx - highlightedIndex) <= 2
+                return (
+                  <span
+                    key={i}
+                    className={`transition-colors duration-200 ${
+                      voiceHighlighted
+                        ? 'text-yellow-300 drop-shadow-[0_0_16px_rgba(253,224,71,0.6)]'
+                        : 'text-white/95'
+                    }`}
+                  >
+                    {word}{' '}
+                  </span>
+                )
+              })
+            )}
+          </p>
+        </div>
+
+        {/* Minimal, ultra-subtle paragraph indicator at bottom */}
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 text-[10px] font-mono text-white/15 select-none pointer-events-none">
+          {paragraphs.length === 0 ? '0 / 0' : `${paragraphIndex + 1} / ${paragraphs.length}`}
+          {!isConnected && ' · offline'}
+          {voiceMode && ' · 🎤'}
+        </div>
+      </div>
+    )
+  }
+
+  // ========== NORMAL SCROLLING VIEW ==========
   return (
     <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex flex-col items-center justify-center p-6">
       <style jsx>{`
@@ -339,7 +481,7 @@ export default function DisplayPage() {
           {mirrorMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↔️ H</span></>)}
           {flipVertical && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↕️ V</span></>)}
           {rotation !== 0 && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span></>)}
-          {remoteSelection && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-red-400">🎯 Highlight</span></>)}
+          {hasSelection && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-red-400">🎯 Focus mode</span></>)}
 
           <span className="text-xs text-white/40">|</span>
 
@@ -391,14 +533,21 @@ export default function DisplayPage() {
           >
             {segments.map((seg, i) => {
               const voiceHighlighted =
+                !hasSelection &&
                 !seg.selected &&
                 seg.wordIndex !== null &&
                 highlightedIndex !== null &&
                 Math.abs(seg.wordIndex - highlightedIndex) <= 2
 
               let cls = 'transition-colors duration-200 '
-              if (seg.selected) {
-                cls += 'bg-red-500/60 text-red-50 rounded-[3px] '
+
+              if (hasSelection) {
+                // FOCUS MODE — only selected text is visible, everything else is transparent
+                if (seg.selected) {
+                  cls += 'bg-red-500/60 text-red-50 rounded-[3px] '
+                } else {
+                  cls += 'text-transparent select-none '
+                }
               } else if (voiceHighlighted) {
                 cls += 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)] '
               } else {
