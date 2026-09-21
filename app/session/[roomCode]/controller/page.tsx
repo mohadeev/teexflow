@@ -7,62 +7,59 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 
 const supabase = createClient()
 
-/**
- * Split a script into ~300-word chunks, breaking at sentence boundaries
- * so chunks end cleanly. Falls back to whitespace boundary if no punctuation.
- */
+type Settings = {
+  speed: number
+  mirrorMode: boolean
+  flipVertical: boolean
+  rotation: 0 | 90 | 180 | 270
+  scriptWidth: number
+  paragraphMode: boolean
+  paragraphIndex: number
+}
+
 function splitIntoParagraphs(content: string, targetWords = 300): string[] {
   if (!content) return []
-
-  // 1. Normalize and split into sentences
   const normalized = content.replace(/\r\n/g, '\n').trim()
   const sentences = normalized.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [normalized]
-
   const paragraphs: string[] = []
   let buffer = ''
   let bufferWordCount = 0
-
   const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
 
   for (const sentence of sentences) {
     const sentWords = countWords(sentence)
-
-    // A single sentence is longer than the target — hard-split by words
     if (sentWords > targetWords) {
-      if (buffer.trim()) {
-        paragraphs.push(buffer.trim())
-        buffer = ''
-        bufferWordCount = 0
-      }
+      if (buffer.trim()) { paragraphs.push(buffer.trim()); buffer = ''; bufferWordCount = 0 }
       const words = sentence.trim().split(/\s+/)
       for (let i = 0; i < words.length; i += targetWords) {
         paragraphs.push(words.slice(i, i + targetWords).join(' '))
       }
       continue
     }
-
-    // Adding this sentence would exceed the target → flush first
     if (bufferWordCount + sentWords > targetWords && buffer.trim()) {
-      paragraphs.push(buffer.trim())
-      buffer = ''
-      bufferWordCount = 0
+      paragraphs.push(buffer.trim()); buffer = ''; bufferWordCount = 0
     }
-
     buffer += (buffer ? ' ' : '') + sentence.trim()
     bufferWordCount += sentWords
   }
-
   if (buffer.trim()) paragraphs.push(buffer.trim())
-
-  // Edge case: no sentences matched → fall back to plain word chunking
   if (paragraphs.length === 0) {
     const words = normalized.split(/\s+/).filter(Boolean)
     for (let i = 0; i < words.length; i += targetWords) {
       paragraphs.push(words.slice(i, i + targetWords).join(' '))
     }
   }
-
   return paragraphs
+}
+
+const DEFAULT_SETTINGS: Settings = {
+  speed: 0.7,
+  mirrorMode: false,
+  flipVertical: false,
+  rotation: 0,
+  scriptWidth: 700,
+  paragraphMode: false,
+  paragraphIndex: 0,
 }
 
 export default function ControllerPage() {
@@ -102,31 +99,65 @@ export default function ControllerPage() {
 
   const lastSelectionRef = useRef('0:0')
 
+  // Settings persistence
+  const hasLoadedSettingsRef = useRef(false)
+  const lastKnownSettingsRef = useRef<string>('')
+  const settingsSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const paragraphs = useMemo(() => splitIntoParagraphs(scriptContent, 300), [scriptContent])
 
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => { scriptWidthRef.current = scriptWidth }, [scriptWidth])
 
-  // --- Fetch script ---
+  // --- Fetch script + settings ---
   useEffect(() => {
     const fetchScript = async () => {
       try {
         const { data: sessionData, error: sessionError } = await supabase
           .from('sessions')
-          .select('script_id, status, scroll_speed, scroll_percentage')
+          .select('script_id, status, scroll_speed, scroll_percentage, settings')
           .eq('room_code', roomCode)
           .maybeSingle()
 
-        if (sessionError || !sessionData) { console.error('Session not found'); setLoading(false); return }
+        if (sessionError || !sessionData) {
+          console.error('Session not found', sessionError)
+          setLoading(false); return
+        }
 
         scriptIdRef.current = sessionData.script_id
         setIsPlaying(sessionData.status === 'playing')
-        setSpeed(0.7)
+
+        const s: any = sessionData.settings || {}
+        const applied: Settings = {
+          speed: typeof s.speed === 'number' ? s.speed : DEFAULT_SETTINGS.speed,
+          mirrorMode: typeof s.mirrorMode === 'boolean' ? s.mirrorMode : DEFAULT_SETTINGS.mirrorMode,
+          flipVertical: typeof s.flipVertical === 'boolean' ? s.flipVertical : DEFAULT_SETTINGS.flipVertical,
+          rotation: (s.rotation === 0 || s.rotation === 90 || s.rotation === 180 || s.rotation === 270)
+            ? s.rotation : DEFAULT_SETTINGS.rotation,
+          scriptWidth: typeof s.scriptWidth === 'number' ? s.scriptWidth : DEFAULT_SETTINGS.scriptWidth,
+          paragraphMode: typeof s.paragraphMode === 'boolean' ? s.paragraphMode : DEFAULT_SETTINGS.paragraphMode,
+          paragraphIndex: typeof s.paragraphIndex === 'number' ? s.paragraphIndex : DEFAULT_SETTINGS.paragraphIndex,
+        }
+
+        setSpeed(applied.speed); speedRef.current = applied.speed
+        setMirrorMode(applied.mirrorMode)
+        setFlipVertical(applied.flipVertical)
+        setRotation(applied.rotation)
+        setScriptWidth(applied.scriptWidth); scriptWidthRef.current = applied.scriptWidth
+        setParagraphMode(applied.paragraphMode)
+        setParagraphIndex(applied.paragraphIndex)
+
+        lastKnownSettingsRef.current = JSON.stringify(applied)
+        hasLoadedSettingsRef.current = true
+
+        console.log('📌 Loaded settings from DB:', applied)
 
         const { data: scriptData, error: scriptError } = await supabase
           .from('scripts').select('content').eq('id', sessionData.script_id).maybeSingle()
 
-        if (scriptError || !scriptData) { console.error('Script not found'); setLoading(false); return }
+        if (scriptError || !scriptData) {
+          console.error('Script not found'); setLoading(false); return
+        }
 
         setScriptContent(scriptData.content)
         setEditContent(scriptData.content)
@@ -141,6 +172,39 @@ export default function ControllerPage() {
     }
     if (roomCode) fetchScript()
   }, [roomCode])
+
+  // --- Persist settings whenever they change (debounced) ---
+  useEffect(() => {
+    if (!hasLoadedSettingsRef.current) return
+    if (!roomCode) return
+
+    const currentObj: Settings = {
+      speed,
+      mirrorMode,
+      flipVertical,
+      rotation,
+      scriptWidth,
+      paragraphMode,
+      paragraphIndex,
+    }
+    const currentJson = JSON.stringify(currentObj)
+    if (currentJson === lastKnownSettingsRef.current) return
+
+    if (settingsSaveRef.current) clearTimeout(settingsSaveRef.current)
+    settingsSaveRef.current = setTimeout(async () => {
+      lastKnownSettingsRef.current = currentJson
+      const { error } = await supabase
+        .from('sessions')
+        .update({ settings: currentObj })
+        .eq('room_code', roomCode)
+
+      if (error) {
+        console.error('❌ Settings save failed:', error)
+      } else {
+        console.log('💾 Settings saved:', currentObj)
+      }
+    }, 500)
+  }, [speed, mirrorMode, flipVertical, rotation, scriptWidth, paragraphMode, paragraphIndex, roomCode])
 
   const getScrollPercentage = () => {
     if (!containerRef.current) return 0
@@ -160,7 +224,6 @@ export default function ControllerPage() {
   const broadcastScript = (content: string) => send('script', { content, from: 'controller' })
 
   const broadcastParagraph = useCallback((mode: boolean, index: number) => {
-    console.log(`📄 Paragraph: mode=${mode} index=${index}`)
     send('paragraph', { mode, index, from: 'controller' })
   }, [send])
 
@@ -219,9 +282,15 @@ export default function ControllerPage() {
     }
   }, [subscribe])
 
+  // Broadcast current width + settings on connect so display is in sync
   useEffect(() => {
     if (!isConnected) return
     broadcastWidth(scriptWidthRef.current)
+    broadcastSpeed(speedRef.current)
+    broadcastMirror(mirrorMode)
+    broadcastFlipVertical(flipVertical)
+    broadcastRotation(rotation)
+    broadcastParagraph(paragraphMode, paragraphIndex)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected])
 
@@ -343,7 +412,6 @@ export default function ControllerPage() {
 
   const handleRefreshDisplay = () => send('refresh', { from: 'controller' })
 
-  // --- Paragraph navigation ---
   const toggleParagraphMode = () => {
     const newMode = !paragraphMode
     const newIndex = newMode ? 0 : paragraphIndex
@@ -366,7 +434,6 @@ export default function ControllerPage() {
   const goPrevParagraph = () => goParagraph(paragraphIndex - 1)
   const goNextParagraph = () => goParagraph(paragraphIndex + 1)
 
-  // --- Editing ---
   const handleEnterEdit = () => {
     if (isPlaying) { setIsPlaying(false); broadcastControl('pause') }
     setEditContent(scriptContent)
@@ -624,18 +691,12 @@ export default function ControllerPage() {
           <div className="flex gap-4 items-start" style={{ width: '100%', maxWidth: '1200px' }}>
             <aside className="w-72 shrink-0 bg-neutral-900/80 backdrop-blur-sm border border-indigo-500/30 rounded-2xl shadow-2xl flex flex-col overflow-hidden" style={{ height: '500px' }}>
               <div className="px-4 py-3 border-b border-indigo-500/20 flex items-center justify-between bg-indigo-500/5">
-                <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">
-                  Paragraphs
-                </span>
-                <span className="text-xs font-mono text-white/50">
-                  {paragraphs.length}
-                </span>
+                <span className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">Paragraphs</span>
+                <span className="text-xs font-mono text-white/50">{paragraphs.length}</span>
               </div>
               <div className="paragraph-scroll flex-1 overflow-y-auto p-2 space-y-1">
                 {paragraphs.length === 0 ? (
-                  <div className="text-xs text-white/30 italic p-4 text-center">
-                    No paragraphs found.
-                  </div>
+                  <div className="text-xs text-white/30 italic p-4 text-center">No paragraphs found.</div>
                 ) : (
                   paragraphs.map((p, i) => {
                     const active = i === paragraphIndex
@@ -648,8 +709,7 @@ export default function ControllerPage() {
                         className={`w-full text-left px-3 py-2.5 rounded-lg transition-all duration-150 group
                           ${active
                             ? 'bg-indigo-500/30 border border-indigo-400/50 shadow-lg shadow-indigo-500/10'
-                            : 'bg-white/[0.02] border border-transparent hover:bg-white/[0.06] hover:border-white/10'
-                          }`}
+                            : 'bg-white/[0.02] border border-transparent hover:bg-white/[0.06] hover:border-white/10'}`}
                       >
                         <div className="flex items-start gap-2">
                           <span className={`text-xs font-mono shrink-0 mt-0.5 ${active ? 'text-indigo-300 font-bold' : 'text-white/40'}`}>
@@ -673,25 +733,13 @@ export default function ControllerPage() {
 
             <div className="flex-1 flex flex-col items-center gap-4">
               <div className="flex items-center gap-3 bg-white/5 backdrop-blur rounded-full px-4 py-2 border border-indigo-500/30">
-                <button
-                  onClick={goPrevParagraph}
-                  disabled={paragraphIndex === 0}
-                  className="text-sm px-3 py-1 rounded-full bg-white/10 text-white hover:bg-white/20 disabled:opacity-30 transition-colors"
-                  title="Previous"
-                >
-                  ⬅️
-                </button>
+                <button onClick={goPrevParagraph} disabled={paragraphIndex === 0}
+                  className="text-sm px-3 py-1 rounded-full bg-white/10 text-white hover:bg-white/20 disabled:opacity-30 transition-colors">⬅️</button>
                 <span className="text-xs font-mono text-indigo-300 min-w-[5rem] text-center">
                   {paragraphs.length === 0 ? '0 / 0' : `${paragraphIndex + 1} / ${paragraphs.length}`}
                 </span>
-                <button
-                  onClick={goNextParagraph}
-                  disabled={paragraphIndex >= paragraphs.length - 1}
-                  className="text-sm px-3 py-1 rounded-full bg-white/10 text-white hover:bg-white/20 disabled:opacity-30 transition-colors"
-                  title="Next"
-                >
-                  ➡️
-                </button>
+                <button onClick={goNextParagraph} disabled={paragraphIndex >= paragraphs.length - 1}
+                  className="text-sm px-3 py-1 rounded-full bg-white/10 text-white hover:bg-white/20 disabled:opacity-30 transition-colors">➡️</button>
               </div>
 
               <div

@@ -14,57 +14,38 @@ type Segment = {
   selected: boolean
 }
 
-/**
- * Split a script into ~300-word chunks, breaking at sentence boundaries
- * so chunks end cleanly. Falls back to whitespace boundary if no punctuation.
- */
 function splitIntoParagraphs(content: string, targetWords = 300): string[] {
   if (!content) return []
-
   const normalized = content.replace(/\r\n/g, '\n').trim()
   const sentences = normalized.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [normalized]
-
   const paragraphs: string[] = []
   let buffer = ''
   let bufferWordCount = 0
-
   const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
 
   for (const sentence of sentences) {
     const sentWords = countWords(sentence)
-
     if (sentWords > targetWords) {
-      if (buffer.trim()) {
-        paragraphs.push(buffer.trim())
-        buffer = ''
-        bufferWordCount = 0
-      }
+      if (buffer.trim()) { paragraphs.push(buffer.trim()); buffer = ''; bufferWordCount = 0 }
       const words = sentence.trim().split(/\s+/)
       for (let i = 0; i < words.length; i += targetWords) {
         paragraphs.push(words.slice(i, i + targetWords).join(' '))
       }
       continue
     }
-
     if (bufferWordCount + sentWords > targetWords && buffer.trim()) {
-      paragraphs.push(buffer.trim())
-      buffer = ''
-      bufferWordCount = 0
+      paragraphs.push(buffer.trim()); buffer = ''; bufferWordCount = 0
     }
-
     buffer += (buffer ? ' ' : '') + sentence.trim()
     bufferWordCount += sentWords
   }
-
   if (buffer.trim()) paragraphs.push(buffer.trim())
-
   if (paragraphs.length === 0) {
     const words = normalized.split(/\s+/).filter(Boolean)
     for (let i = 0; i < words.length; i += targetWords) {
       paragraphs.push(words.slice(i, i + targetWords).join(' '))
     }
   }
-
   return paragraphs
 }
 
@@ -104,20 +85,33 @@ export default function DisplayPage() {
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => { voiceModeRef.current = voiceMode }, [voiceMode])
 
-  // --- Fetch script ---
+  // --- Fetch script + settings ---
   useEffect(() => {
     const fetchScript = async () => {
       try {
         const { data: sessionData, error: sessionError } = await supabase
           .from('sessions')
-          .select('script_id, status, scroll_speed, scroll_percentage')
+          .select('script_id, status, scroll_speed, scroll_percentage, settings')
           .eq('room_code', roomCode)
           .maybeSingle()
 
         if (sessionError || !sessionData) { console.error('❌ Session not found'); setLoading(false); return }
 
         setIsPlaying(sessionData.status === 'playing')
-        setSpeed(0.7)
+
+        // ---- Apply persisted settings ----
+        const s: any = sessionData.settings || {}
+        if (typeof s.speed === 'number') { setSpeed(s.speed); speedRef.current = s.speed }
+        if (typeof s.mirrorMode === 'boolean') setMirrorMode(s.mirrorMode)
+        if (typeof s.flipVertical === 'boolean') setFlipVertical(s.flipVertical)
+        if (s.rotation === 0 || s.rotation === 90 || s.rotation === 180 || s.rotation === 270) {
+          setRotation(s.rotation)
+        }
+        if (typeof s.scriptWidth === 'number') setScriptWidth(s.scriptWidth)
+        if (typeof s.paragraphMode === 'boolean') setParagraphMode(s.paragraphMode)
+        if (typeof s.paragraphIndex === 'number') setParagraphIndex(s.paragraphIndex)
+
+        console.log('📌 Display loaded settings:', s)
 
         const { data: scriptData, error: scriptError } = await supabase
           .from('scripts').select('content').eq('id', sessionData.script_id).maybeSingle()
@@ -138,7 +132,6 @@ export default function DisplayPage() {
     if (roomCode) fetchScript()
   }, [roomCode])
 
-  // --- Paragraph data ---
   const paragraphs = useMemo(() => splitIntoParagraphs(scriptContent, 300), [scriptContent])
 
   const paragraphWordRanges = useMemo(() => {
@@ -151,7 +144,6 @@ export default function DisplayPage() {
     })
   }, [paragraphs])
 
-  // --- Segments for normal view ---
   const segments = useMemo<Segment[]>(() => {
     if (!scriptContent) return []
     const parts = scriptContent.split(/(\s+)/)
@@ -220,7 +212,6 @@ export default function DisplayPage() {
     SpeechRecognition.stopListening(); setHighlightedIndex(null)
   }, [])
 
-  // --- Transcript processing ---
   useEffect(() => {
     if (!voiceMode || !transcript || transcript.trim() === '') return
     const heard = transcript.trim().toLowerCase()
@@ -412,10 +403,7 @@ export default function DisplayPage() {
         >
           <p
             className="text-center text-5xl md:text-6xl lg:text-7xl font-light leading-tight text-white/95 whitespace-pre-wrap max-w-[1400px]"
-            style={{
-              width: `${scriptWidth}px`,
-              maxWidth: '90vw',
-            }}
+            style={{ width: `${scriptWidth}px`, maxWidth: '90vw' }}
           >
             {currentParagraphWords.length === 0 ? (
               <span className="text-white/20">—</span>
@@ -442,7 +430,6 @@ export default function DisplayPage() {
           </p>
         </div>
 
-        {/* Minimal, ultra-subtle paragraph indicator at bottom */}
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 text-[10px] font-mono text-white/15 select-none pointer-events-none">
           {paragraphs.length === 0 ? '0 / 0' : `${paragraphIndex + 1} / ${paragraphs.length}`}
           {!isConnected && ' · offline'}
@@ -542,7 +529,6 @@ export default function DisplayPage() {
               let cls = 'transition-colors duration-200 '
 
               if (hasSelection) {
-                // FOCUS MODE — only selected text is visible, everything else is transparent
                 if (seg.selected) {
                   cls += 'bg-red-500/60 text-red-50 rounded-[3px] '
                 } else {
