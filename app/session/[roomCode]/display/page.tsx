@@ -8,6 +8,10 @@ import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognitio
 
 const supabase = createClient()
 
+// 👇 Same lockout window — while the controller is streaming scroll messages,
+// the display's timer keeps resetting, so it stays a pure follower (no echo).
+const REMOTE_SCROLL_LOCKOUT_MS = 500
+
 type Segment = {
   text: string
   wordIndex: number | null
@@ -63,6 +67,9 @@ export default function DisplayPage() {
   const animationRef = useRef<number | null>(null)
   const speedRef = useRef(0.7)
 
+  // 👇 Timestamp of the last remote scroll received
+  const lastRemoteScrollAtRef = useRef(0)
+
   const [voiceMode, setVoiceMode] = useState(false)
   const voiceModeRef = useRef(false)
   const [mirrorMode, setMirrorMode] = useState(false)
@@ -74,6 +81,8 @@ export default function DisplayPage() {
 
   const [paragraphMode, setParagraphMode] = useState(false)
   const [paragraphIndex, setParagraphIndex] = useState(0)
+
+  const [menuHidden, setMenuHidden] = useState(false)
 
   const wordsRef = useRef<string[]>([])
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
@@ -99,7 +108,6 @@ export default function DisplayPage() {
 
         setIsPlaying(sessionData.status === 'playing')
 
-        // ---- Apply persisted settings ----
         const s: any = sessionData.settings || {}
         if (typeof s.speed === 'number') { setSpeed(s.speed); speedRef.current = s.speed }
         if (typeof s.mirrorMode === 'boolean') setMirrorMode(s.mirrorMode)
@@ -110,6 +118,7 @@ export default function DisplayPage() {
         if (typeof s.scriptWidth === 'number') setScriptWidth(s.scriptWidth)
         if (typeof s.paragraphMode === 'boolean') setParagraphMode(s.paragraphMode)
         if (typeof s.paragraphIndex === 'number') setParagraphIndex(s.paragraphIndex)
+        if (typeof s.menuHidden === 'boolean') setMenuHidden(s.menuHidden)
 
         console.log('📌 Display loaded settings:', s)
 
@@ -192,13 +201,15 @@ export default function DisplayPage() {
     [send]
   )
 
+  // 👇 Stamp the moment we receive a remote scroll
   const applyScroll = useCallback((percentage: number) => {
     if (!containerRef.current) return
+    lastRemoteScrollAtRef.current = Date.now()
     const c = containerRef.current
     const maxScroll = c.scrollHeight - c.clientHeight
     isRemoteScrollRef.current = true
     c.scrollTop = (percentage / 100) * maxScroll
-    setTimeout(() => { isRemoteScrollRef.current = false }, 50)
+    setTimeout(() => { isRemoteScrollRef.current = false }, 250)
   }, [])
 
   const startVoiceTracking = useCallback(() => {
@@ -275,6 +286,14 @@ export default function DisplayPage() {
     const step = (time: number) => {
       const delta = (time - lastTime) / 1000
       lastTime = time
+
+      // 👇 If a remote scroll just came in, let the controller drive.
+      //    Do NOT advance locally and do NOT broadcast back.
+      if (Date.now() - lastRemoteScrollAtRef.current < REMOTE_SCROLL_LOCKOUT_MS) {
+        animationRef.current = requestAnimationFrame(step)
+        return
+      }
+
       const maxScroll = container.scrollHeight - container.clientHeight
       let newScroll = container.scrollTop + delta * speedRef.current * 60
       if (newScroll > maxScroll) newScroll = maxScroll
@@ -290,8 +309,10 @@ export default function DisplayPage() {
     }
   }, [isPlaying, loading, voiceMode, broadcastScroll, paragraphMode])
 
+  // 👇 Don't echo back while a remote scroll is fresh
   const handleScroll = () => {
     if (isRemoteScrollRef.current) return
+    if (Date.now() - lastRemoteScrollAtRef.current < REMOTE_SCROLL_LOCKOUT_MS) return
     if (paragraphMode) return
     broadcastScroll(getScrollPercentage())
   }
@@ -360,6 +381,11 @@ export default function DisplayPage() {
       if (payload.mode) setRemoteSelection(null)
     })
 
+    const unsubMenu = subscribe('menu', (payload) => {
+      if (payload.from !== 'controller') return
+      if (typeof payload.menuHidden === 'boolean') setMenuHidden(payload.menuHidden)
+    })
+
     const unsubRefresh = subscribe('refresh', (payload) => {
       if (payload.from !== 'controller') return
       window.location.reload()
@@ -368,7 +394,7 @@ export default function DisplayPage() {
     return () => {
       unsubScroll(); unsubSpeed(); unsubControl(); unsubVoice()
       unsubMirror(); unsubFlipVertical(); unsubRotation(); unsubWidth()
-      unsubScript(); unsubSelection(); unsubParagraph(); unsubRefresh()
+      unsubScript(); unsubSelection(); unsubParagraph(); unsubMenu(); unsubRefresh()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
@@ -388,6 +414,12 @@ export default function DisplayPage() {
   const currentParagraphText = paragraphs[paragraphIndex] ?? ''
   const currentRange = paragraphWordRanges[paragraphIndex] ?? { start: 0, end: 0, count: 0 }
   const currentParagraphWords = currentParagraphText.split(/\s+/).filter((w) => w.length > 0)
+
+  const toggleMenu = () => {
+    const newState = !menuHidden
+    setMenuHidden(newState)
+    send('menu', { menuHidden: newState, from: 'display' })
+  }
 
   // ========== DISTRACTION-FREE PARAGRAPH VIEW ==========
   if (paragraphMode) {
@@ -449,53 +481,67 @@ export default function DisplayPage() {
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
       `}</style>
 
+      <button
+        onClick={toggleMenu}
+        title={menuHidden ? 'Show status' : 'Hide status'}
+        className="fixed top-4 right-4 z-40 w-8 h-8 rounded-full bg-white/5 backdrop-blur-md border border-white/10 text-white/30 hover:text-white/90 hover:bg-white/15 hover:border-white/25 flex items-center justify-center transition-all duration-200 select-none"
+      >
+        {menuHidden ? (
+          <span className="text-sm leading-none">ℹ️</span>
+        ) : (
+          <span className="text-sm leading-none">✕</span>
+        )}
+      </button>
+
       <div className="flex flex-col items-center w-full max-w-6xl gap-6">
-        <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex items-center justify-center gap-6 flex-wrap">
-          <span className="text-xs font-medium text-white/60 flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-white/20'}`}></span>
-            {isPlaying ? 'Playing' : 'Paused'}
-          </span>
-          <span className="text-xs text-white/40">|</span>
-          <span className="text-xs font-medium text-white/60 flex items-center gap-1">
-            <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.6)]' : 'bg-red-400'}`}></span>
-            {isConnected ? 'Connected' : 'Disconnected'}
-          </span>
-          <span className="text-xs text-white/40">|</span>
-          <span className="text-xs font-mono text-cyan-300">Speed: {speed.toFixed(2)}x</span>
-          <span className="text-xs text-white/40">|</span>
-          <span className="text-xs font-mono text-cyan-300">Width: {scriptWidth}px</span>
-          {voiceMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-violet-400">🎤 Voice {listening ? '🎧' : ''}</span></>)}
-          {mirrorMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↔️ H</span></>)}
-          {flipVertical && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↕️ V</span></>)}
-          {rotation !== 0 && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span></>)}
-          {hasSelection && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-red-400">🎯 Focus mode</span></>)}
+        {!menuHidden && (
+          <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex items-center justify-center gap-6 flex-wrap">
+            <span className="text-xs font-medium text-white/60 flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-white/20'}`}></span>
+              {isPlaying ? 'Playing' : 'Paused'}
+            </span>
+            <span className="text-xs text-white/40">|</span>
+            <span className="text-xs font-medium text-white/60 flex items-center gap-1">
+              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.6)]' : 'bg-red-400'}`}></span>
+              {isConnected ? 'Connected' : 'Disconnected'}
+            </span>
+            <span className="text-xs text-white/40">|</span>
+            <span className="text-xs font-mono text-cyan-300">Speed: {speed.toFixed(2)}x</span>
+            <span className="text-xs text-white/40">|</span>
+            <span className="text-xs font-mono text-cyan-300">Width: {scriptWidth}px</span>
+            {voiceMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-violet-400">🎤 Voice {listening ? '🎧' : ''}</span></>)}
+            {mirrorMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↔️ H</span></>)}
+            {flipVertical && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↕️ V</span></>)}
+            {rotation !== 0 && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span></>)}
+            {hasSelection && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-red-400">🎯 Focus mode</span></>)}
 
-          <span className="text-xs text-white/40">|</span>
+            <span className="text-xs text-white/40">|</span>
 
-          <button
-            onClick={() => {
-              const s = !mirrorMode; setMirrorMode(s); send('mirror', { active: s, from: 'display' })
-            }}
-            className={`text-xs px-3 py-1 rounded-full transition-colors
-              ${mirrorMode ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
-          >↔️ {mirrorMode ? 'H ON' : 'H OFF'}</button>
+            <button
+              onClick={() => {
+                const s = !mirrorMode; setMirrorMode(s); send('mirror', { active: s, from: 'display' })
+              }}
+              className={`text-xs px-3 py-1 rounded-full transition-colors
+                ${mirrorMode ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
+            >↔️ {mirrorMode ? 'H ON' : 'H OFF'}</button>
 
-          <button
-            onClick={() => {
-              const s = !flipVertical; setFlipVertical(s); send('flipVertical', { active: s, from: 'display' })
-            }}
-            className={`text-xs px-3 py-1 rounded-full transition-colors
-              ${flipVertical ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
-          >↕️ {flipVertical ? 'V ON' : 'V OFF'}</button>
+            <button
+              onClick={() => {
+                const s = !flipVertical; setFlipVertical(s); send('flipVertical', { active: s, from: 'display' })
+              }}
+              className={`text-xs px-3 py-1 rounded-full transition-colors
+                ${flipVertical ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
+            >↕️ {flipVertical ? 'V ON' : 'V OFF'}</button>
 
-          <button
-            onClick={() => {
-              const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
-              setRotation(next); send('rotation', { degrees: next, from: 'display' })
-            }}
-            className="text-xs px-3 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors"
-          >🔄 {rotation}°</button>
-        </div>
+            <button
+              onClick={() => {
+                const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
+                setRotation(next); send('rotation', { degrees: next, from: 'display' })
+              }}
+              className="text-xs px-3 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors"
+            >🔄 {rotation}°</button>
+          </div>
+        )}
 
         <div
           className="flex items-center justify-center"

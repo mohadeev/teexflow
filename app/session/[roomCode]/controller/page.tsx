@@ -7,6 +7,11 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 
 const supabase = createClient()
 
+// After receiving a remote scroll, ignore own scroll broadcasts for this long.
+// While the other side is autoscrolling (sending ~60 msgs/sec) this timer keeps
+// resetting, so we stay a pure follower — no feedback loop, no jitter.
+const REMOTE_SCROLL_LOCKOUT_MS = 500
+
 type Settings = {
   speed: number
   mirrorMode: boolean
@@ -15,6 +20,7 @@ type Settings = {
   scriptWidth: number
   paragraphMode: boolean
   paragraphIndex: number
+  menuHidden: boolean
 }
 
 function splitIntoParagraphs(content: string, targetWords = 300): string[] {
@@ -60,6 +66,7 @@ const DEFAULT_SETTINGS: Settings = {
   scriptWidth: 700,
   paragraphMode: false,
   paragraphIndex: 0,
+  menuHidden: false,
 }
 
 export default function ControllerPage() {
@@ -76,6 +83,9 @@ export default function ControllerPage() {
   const animationRef = useRef<number | null>(null)
   const hasReachedBottomRef = useRef(false)
   const speedRef = useRef(0.7)
+
+  // 👇 Timestamp of the last remote scroll received
+  const lastRemoteScrollAtRef = useRef(0)
 
   const [voiceMode, setVoiceMode] = useState(false)
   const [mirrorMode, setMirrorMode] = useState(false)
@@ -97,9 +107,10 @@ export default function ControllerPage() {
   const [paragraphMode, setParagraphMode] = useState(false)
   const [paragraphIndex, setParagraphIndex] = useState(0)
 
+  const [menuHidden, setMenuHidden] = useState(false)
+
   const lastSelectionRef = useRef('0:0')
 
-  // Settings persistence
   const hasLoadedSettingsRef = useRef(false)
   const lastKnownSettingsRef = useRef<string>('')
   const settingsSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -137,6 +148,7 @@ export default function ControllerPage() {
           scriptWidth: typeof s.scriptWidth === 'number' ? s.scriptWidth : DEFAULT_SETTINGS.scriptWidth,
           paragraphMode: typeof s.paragraphMode === 'boolean' ? s.paragraphMode : DEFAULT_SETTINGS.paragraphMode,
           paragraphIndex: typeof s.paragraphIndex === 'number' ? s.paragraphIndex : DEFAULT_SETTINGS.paragraphIndex,
+          menuHidden: typeof s.menuHidden === 'boolean' ? s.menuHidden : DEFAULT_SETTINGS.menuHidden,
         }
 
         setSpeed(applied.speed); speedRef.current = applied.speed
@@ -146,6 +158,7 @@ export default function ControllerPage() {
         setScriptWidth(applied.scriptWidth); scriptWidthRef.current = applied.scriptWidth
         setParagraphMode(applied.paragraphMode)
         setParagraphIndex(applied.paragraphIndex)
+        setMenuHidden(applied.menuHidden)
 
         lastKnownSettingsRef.current = JSON.stringify(applied)
         hasLoadedSettingsRef.current = true
@@ -173,7 +186,7 @@ export default function ControllerPage() {
     if (roomCode) fetchScript()
   }, [roomCode])
 
-  // --- Persist settings whenever they change (debounced) ---
+  // --- Persist settings (debounced) ---
   useEffect(() => {
     if (!hasLoadedSettingsRef.current) return
     if (!roomCode) return
@@ -186,6 +199,7 @@ export default function ControllerPage() {
       scriptWidth,
       paragraphMode,
       paragraphIndex,
+      menuHidden,
     }
     const currentJson = JSON.stringify(currentObj)
     if (currentJson === lastKnownSettingsRef.current) return
@@ -204,7 +218,7 @@ export default function ControllerPage() {
         console.log('💾 Settings saved:', currentObj)
       }
     }, 500)
-  }, [speed, mirrorMode, flipVertical, rotation, scriptWidth, paragraphMode, paragraphIndex, roomCode])
+  }, [speed, mirrorMode, flipVertical, rotation, scriptWidth, paragraphMode, paragraphIndex, menuHidden, roomCode])
 
   const getScrollPercentage = () => {
     if (!containerRef.current) return 0
@@ -222,6 +236,7 @@ export default function ControllerPage() {
   const broadcastRotation = (deg: number) => send('rotation', { degrees: deg, from: 'controller' })
   const broadcastWidth = (width: number) => send('width', { width, from: 'controller' })
   const broadcastScript = (content: string) => send('script', { content, from: 'controller' })
+  const broadcastMenu = (hidden: boolean) => send('menu', { menuHidden: hidden, from: 'controller' })
 
   const broadcastParagraph = useCallback((mode: boolean, index: number) => {
     send('paragraph', { mode, index, from: 'controller' })
@@ -234,14 +249,16 @@ export default function ControllerPage() {
     send('selection', { start, end, from: 'controller' })
   }, [send])
 
-  const applyScroll = (percentage: number) => {
+  // 👇 Stamp the moment we receive a remote scroll
+  const applyScroll = useCallback((percentage: number) => {
     if (!containerRef.current) return
+    lastRemoteScrollAtRef.current = Date.now()
     const c = containerRef.current
     const maxScroll = c.scrollHeight - c.clientHeight
     isRemoteScrollRef.current = true
     c.scrollTop = (percentage / 100) * maxScroll
-    setTimeout(() => { isRemoteScrollRef.current = false }, 50)
-  }
+    setTimeout(() => { isRemoteScrollRef.current = false }, 250)
+  }, [])
 
   // --- Subscribe ---
   useEffect(() => {
@@ -275,14 +292,18 @@ export default function ControllerPage() {
       setParagraphMode(payload.mode)
       setParagraphIndex(payload.index)
     })
+    const unsubMenu = subscribe('menu', (payload) => {
+      if (payload.from !== 'display') return
+      if (typeof payload.menuHidden === 'boolean') setMenuHidden(payload.menuHidden)
+    })
 
     return () => {
       unsubScroll(); unsubVoice(); unsubMirror(); unsubFlipVertical()
-      unsubRotation(); unsubWidth(); unsubScript(); unsubParagraph()
+      unsubRotation(); unsubWidth(); unsubScript(); unsubParagraph(); unsubMenu()
     }
-  }, [subscribe])
+  }, [subscribe, applyScroll])
 
-  // Broadcast current width + settings on connect so display is in sync
+  // Broadcast current state on connect
   useEffect(() => {
     if (!isConnected) return
     broadcastWidth(scriptWidthRef.current)
@@ -291,6 +312,7 @@ export default function ControllerPage() {
     broadcastFlipVertical(flipVertical)
     broadcastRotation(rotation)
     broadcastParagraph(paragraphMode, paragraphIndex)
+    broadcastMenu(menuHidden)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected])
 
@@ -341,6 +363,13 @@ export default function ControllerPage() {
     const step = (time: number) => {
       const delta = (time - lastTime) / 1000
       lastTime = time
+
+      // 👇 If a remote scroll just came in (display is echoing), don't advance — let it settle.
+      if (Date.now() - lastRemoteScrollAtRef.current < REMOTE_SCROLL_LOCKOUT_MS) {
+        animationRef.current = requestAnimationFrame(step)
+        return
+      }
+
       const maxScroll = container.scrollHeight - container.clientHeight
       const newScroll = Math.min(container.scrollTop + delta * speedRef.current * 60, maxScroll)
       container.scrollTop = newScroll
@@ -363,8 +392,10 @@ export default function ControllerPage() {
     }
   }, [isPlaying, loading, voiceMode, isEditing, paragraphMode])
 
+  // 👇 Don't echo back while a remote scroll is fresh
   const handleScroll = () => {
     if (isRemoteScrollRef.current) return
+    if (Date.now() - lastRemoteScrollAtRef.current < REMOTE_SCROLL_LOCKOUT_MS) return
     broadcastScroll(getScrollPercentage())
   }
 
@@ -411,6 +442,12 @@ export default function ControllerPage() {
   }
 
   const handleRefreshDisplay = () => send('refresh', { from: 'controller' })
+
+  const toggleMenu = () => {
+    const newState = !menuHidden
+    setMenuHidden(newState)
+    broadcastMenu(newState)
+  }
 
   const toggleParagraphMode = () => {
     const newMode = !paragraphMode
@@ -528,153 +565,167 @@ export default function ControllerPage() {
         .paragraph-scroll::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.6); }
       `}</style>
 
+      <button
+        onClick={toggleMenu}
+        title={menuHidden ? 'Show controls' : 'Hide controls'}
+        className="fixed top-4 left-4 z-50 w-11 h-11 rounded-full bg-white/10 backdrop-blur-xl border border-white/20 text-white/80 hover:bg-white/20 hover:text-white shadow-lg flex items-center justify-center transition-all duration-200"
+      >
+        {menuHidden ? (
+          <span className="text-lg leading-none">☰</span>
+        ) : (
+          <span className="text-lg leading-none">✕</span>
+        )}
+      </button>
+
       <div className="flex flex-col items-center w-full max-w-7xl gap-6">
-        <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex flex-wrap items-center justify-center gap-4">
-          <button
-            onClick={togglePlay}
-            disabled={voiceMode || isEditing || paragraphMode}
-            className={`group relative px-6 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 
-              ${voiceMode || isEditing || paragraphMode
-                ? 'bg-neutral-700 text-neutral-300 cursor-not-allowed'
-                : isPlaying
-                  ? 'bg-amber-500/90 text-black hover:bg-amber-400 shadow-lg shadow-amber-500/20'
-                  : hasReachedBottomRef.current
-                    ? 'bg-sky-500/90 text-white hover:bg-sky-400 shadow-lg shadow-sky-500/20'
-                    : 'bg-emerald-500/90 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/20'
-              } disabled:opacity-70`}
-          >
-            {voiceMode ? '🔒 Voice Lock'
-              : isEditing ? '✏️ Editing'
-              : paragraphMode ? '📄 Framed'
-              : isPlaying ? '⏸ Pause'
-              : hasReachedBottomRef.current ? '🔄 Restart'
-              : '▶ Play'}
-          </button>
-
-          <button
-            onClick={handleRefreshDisplay}
-            className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-slate-600/90 text-white hover:bg-slate-500 shadow-lg shadow-slate-600/20"
-          >
-            🔄 Refresh Display
-          </button>
-
-          <button
-            onClick={toggleParagraphMode}
-            disabled={isEditing}
-            className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 disabled:opacity-50
-              ${paragraphMode
-                ? 'bg-indigo-500/90 text-white hover:bg-indigo-400 shadow-lg shadow-indigo-500/20'
-                : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'}`}
-          >
-            📄 {paragraphMode ? 'Paragraph ON' : 'Paragraph OFF'}
-          </button>
-
-          {!isEditing ? (
+        {!menuHidden && (
+          <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex flex-wrap items-center justify-center gap-4">
             <button
-              onClick={handleEnterEdit}
-              disabled={paragraphMode}
-              className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-fuchsia-600/90 text-white hover:bg-fuchsia-500 shadow-lg shadow-fuchsia-500/20 disabled:opacity-50"
+              onClick={togglePlay}
+              disabled={voiceMode || isEditing || paragraphMode}
+              className={`group relative px-6 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 
+                ${voiceMode || isEditing || paragraphMode
+                  ? 'bg-neutral-700 text-neutral-300 cursor-not-allowed'
+                  : isPlaying
+                    ? 'bg-amber-500/90 text-black hover:bg-amber-400 shadow-lg shadow-amber-500/20'
+                    : hasReachedBottomRef.current
+                      ? 'bg-sky-500/90 text-white hover:bg-sky-400 shadow-lg shadow-sky-500/20'
+                      : 'bg-emerald-500/90 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/20'
+                } disabled:opacity-70`}
             >
-              ✏️ Edit Script
+              {voiceMode ? '🔒 Voice Lock'
+                : isEditing ? '✏️ Editing'
+                : paragraphMode ? '📄 Framed'
+                : isPlaying ? '⏸ Pause'
+                : hasReachedBottomRef.current ? '🔄 Restart'
+                : '▶ Play'}
             </button>
-          ) : (
-            <>
+
+            <button
+              onClick={handleRefreshDisplay}
+              className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-slate-600/90 text-white hover:bg-slate-500 shadow-lg shadow-slate-600/20"
+            >
+              🔄 Refresh Display
+            </button>
+
+            <button
+              onClick={toggleParagraphMode}
+              disabled={isEditing}
+              className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 disabled:opacity-50
+                ${paragraphMode
+                  ? 'bg-indigo-500/90 text-white hover:bg-indigo-400 shadow-lg shadow-indigo-500/20'
+                  : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'}`}
+            >
+              📄 {paragraphMode ? 'Paragraph ON' : 'Paragraph OFF'}
+            </button>
+
+            {!isEditing ? (
               <button
-                onClick={handleSaveScript}
-                disabled={saving}
-                className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-emerald-500/90 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/20 disabled:opacity-60"
+                onClick={handleEnterEdit}
+                disabled={paragraphMode}
+                className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-fuchsia-600/90 text-white hover:bg-fuchsia-500 shadow-lg shadow-fuchsia-500/20 disabled:opacity-50"
               >
-                {saving ? '⏳ Saving...' : '💾 Save Script'}
+                ✏️ Edit Script
               </button>
-              <button
-                onClick={handleCancelEdit}
-                disabled={saving}
-                className="px-4 py-2.5 rounded-full font-semibold text-sm tracking-wide bg-white/10 text-white/70 hover:bg-white/20 border border-white/10 transition-colors disabled:opacity-50"
-              >
-                ✖ Cancel
-              </button>
-            </>
-          )}
-
-          <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
-            <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Speed</span>
-            <button onClick={() => handleSpeedChange(speed - 0.1)} className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-white/70 flex items-center justify-center text-sm transition-colors">−</button>
-            <input type="range" min="0.1" max="5" step="0.1" value={speed}
-              onChange={(e) => handleSpeedChange(parseFloat(e.target.value))}
-              className="w-32 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-cyan-400" />
-            <button onClick={() => handleSpeedChange(speed + 0.1)} className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-white/70 flex items-center justify-center text-sm transition-colors">+</button>
-            <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{speed.toFixed(1)}x</span>
-          </div>
-
-          <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
-            <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Width</span>
-            <input type="range" min="300" max="1400" step="10" value={scriptWidth}
-              onChange={(e) => handleWidthChange(parseInt(e.target.value, 10))}
-              className="w-32 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-cyan-400" />
-            <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{scriptWidth}px</span>
-          </div>
-
-          <button
-            onClick={toggleVoiceMode}
-            disabled={isEditing}
-            className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 disabled:opacity-50
-              ${voiceMode
-                ? 'bg-rose-500/90 text-white hover:bg-rose-400 shadow-lg shadow-rose-500/20'
-                : 'bg-violet-600/90 text-white hover:bg-violet-500 shadow-lg shadow-violet-500/20'}`}
-          >
-            {voiceMode ? '⏹ Stop Voice' : '🎤 Voice Track'}
-          </button>
-
-          <button
-            onClick={toggleMirrorMode}
-            className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
-              ${mirrorMode
-                ? 'bg-cyan-500/90 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'
-                : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'}`}
-          >
-            {mirrorMode ? '↔️ Flip H ON' : '↔️ Flip H OFF'}
-          </button>
-
-          <button
-            onClick={toggleFlipVertical}
-            className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
-              ${flipVertical
-                ? 'bg-cyan-500/90 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'
-                : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'}`}
-          >
-            {flipVertical ? '↕️ Flip V ON' : '↕️ Flip V OFF'}
-          </button>
-
-          <div className="flex items-center gap-2 bg-white/5 rounded-full px-3 py-2 border border-white/10">
-            <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Rotate</span>
-            {([0, 90, 180, 270] as const).map((deg) => (
-              <button
-                key={deg}
-                onClick={() => setRotationDirect(deg)}
-                className={`text-xs px-2.5 py-1 rounded-full font-mono transition-colors
-                  ${rotation === deg
-                    ? 'bg-cyan-500/90 text-black shadow-lg shadow-cyan-500/20'
-                    : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
-              >{deg}°</button>
-            ))}
-            <button onClick={cycleRotation} className="text-xs px-2.5 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors">⟳</button>
-          </div>
-
-          <div className="flex items-center gap-2 text-xs text-white/40">
-            <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-red-400'}`}></span>
-            {voiceMode && <span className="text-violet-300 font-medium">Voice</span>}
-            {mirrorMode && <span className="text-cyan-300 font-medium">Flip H</span>}
-            {flipVertical && <span className="text-cyan-300 font-medium">Flip V</span>}
-            {rotation !== 0 && <span className="text-cyan-300 font-medium">Rot {rotation}°</span>}
-            {paragraphMode && <span className="text-indigo-300 font-medium">Paragraph</span>}
-            {isEditing && <span className="text-fuchsia-300 font-medium animate-pulse">Editing…</span>}
-            {saving && <span className="text-emerald-300 font-medium">Saving…</span>}
-            {!saving && !saveError && lastSavedAt && (
-              <span className="text-emerald-400/70">✓ Saved {lastSavedAt.toLocaleTimeString()}</span>
+            ) : (
+              <>
+                <button
+                  onClick={handleSaveScript}
+                  disabled={saving}
+                  className="px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 bg-emerald-500/90 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/20 disabled:opacity-60"
+                >
+                  {saving ? '⏳ Saving...' : '💾 Save Script'}
+                </button>
+                <button
+                  onClick={handleCancelEdit}
+                  disabled={saving}
+                  className="px-4 py-2.5 rounded-full font-semibold text-sm tracking-wide bg-white/10 text-white/70 hover:bg-white/20 border border-white/10 transition-colors disabled:opacity-50"
+                >
+                  ✖ Cancel
+                </button>
+              </>
             )}
-            {saveError && <span className="text-red-400 font-medium">⚠ {saveError}</span>}
+
+            <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
+              <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Speed</span>
+              <button onClick={() => handleSpeedChange(speed - 0.1)} className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-white/70 flex items-center justify-center text-sm transition-colors">−</button>
+              <input type="range" min="0.1" max="5" step="0.1" value={speed}
+                onChange={(e) => handleSpeedChange(parseFloat(e.target.value))}
+                className="w-32 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-cyan-400" />
+              <button onClick={() => handleSpeedChange(speed + 0.1)} className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-white/70 flex items-center justify-center text-sm transition-colors">+</button>
+              <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{speed.toFixed(1)}x</span>
+            </div>
+
+            <div className="flex items-center gap-3 bg-white/5 rounded-full px-4 py-2 border border-white/10">
+              <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Width</span>
+              <input type="range" min="300" max="1400" step="10" value={scriptWidth}
+                onChange={(e) => handleWidthChange(parseInt(e.target.value, 10))}
+                className="w-32 h-1 bg-white/20 rounded-lg appearance-none cursor-pointer accent-cyan-400" />
+              <span className="text-sm font-mono text-cyan-300 min-w-[3.5rem]">{scriptWidth}px</span>
+            </div>
+
+            <button
+              onClick={toggleVoiceMode}
+              disabled={isEditing}
+              className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200 disabled:opacity-50
+                ${voiceMode
+                  ? 'bg-rose-500/90 text-white hover:bg-rose-400 shadow-lg shadow-rose-500/20'
+                  : 'bg-violet-600/90 text-white hover:bg-violet-500 shadow-lg shadow-violet-500/20'}`}
+            >
+              {voiceMode ? '⏹ Stop Voice' : '🎤 Voice Track'}
+            </button>
+
+            <button
+              onClick={toggleMirrorMode}
+              className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
+                ${mirrorMode
+                  ? 'bg-cyan-500/90 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'
+                  : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'}`}
+            >
+              {mirrorMode ? '↔️ Flip H ON' : '↔️ Flip H OFF'}
+            </button>
+
+            <button
+              onClick={toggleFlipVertical}
+              className={`px-5 py-2.5 rounded-full font-semibold text-sm tracking-wide transition-all duration-200
+                ${flipVertical
+                  ? 'bg-cyan-500/90 text-black hover:bg-cyan-400 shadow-lg shadow-cyan-500/20'
+                  : 'bg-white/10 text-white/80 hover:bg-white/20 border border-white/10'}`}
+            >
+              {flipVertical ? '↕️ Flip V ON' : '↕️ Flip V OFF'}
+            </button>
+
+            <div className="flex items-center gap-2 bg-white/5 rounded-full px-3 py-2 border border-white/10">
+              <span className="text-xs font-medium text-white/50 uppercase tracking-wider">Rotate</span>
+              {([0, 90, 180, 270] as const).map((deg) => (
+                <button
+                  key={deg}
+                  onClick={() => setRotationDirect(deg)}
+                  className={`text-xs px-2.5 py-1 rounded-full font-mono transition-colors
+                    ${rotation === deg
+                      ? 'bg-cyan-500/90 text-black shadow-lg shadow-cyan-500/20'
+                      : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
+                >{deg}°</button>
+              ))}
+              <button onClick={cycleRotation} className="text-xs px-2.5 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors">⟳</button>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs text-white/40">
+              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-red-400'}`}></span>
+              {voiceMode && <span className="text-violet-300 font-medium">Voice</span>}
+              {mirrorMode && <span className="text-cyan-300 font-medium">Flip H</span>}
+              {flipVertical && <span className="text-cyan-300 font-medium">Flip V</span>}
+              {rotation !== 0 && <span className="text-cyan-300 font-medium">Rot {rotation}°</span>}
+              {paragraphMode && <span className="text-indigo-300 font-medium">Paragraph</span>}
+              {isEditing && <span className="text-fuchsia-300 font-medium animate-pulse">Editing…</span>}
+              {saving && <span className="text-emerald-300 font-medium">Saving…</span>}
+              {!saving && !saveError && lastSavedAt && (
+                <span className="text-emerald-400/70">✓ Saved {lastSavedAt.toLocaleTimeString()}</span>
+              )}
+              {saveError && <span className="text-red-400 font-medium">⚠ {saveError}</span>}
+            </div>
           </div>
-        </div>
+        )}
 
         {isEditing ? (
           <textarea
@@ -763,19 +814,21 @@ export default function ControllerPage() {
           </div>
         )}
 
-        <div className="flex items-center gap-4 text-xs text-white/30">
-          <span>
-            {isEditing ? '✏️ Editing — select text to highlight on display'
-              : paragraphMode ? `📄 Paragraph ${paragraphIndex + 1} of ${paragraphs.length} (~300 words each) — click a paragraph in the sidebar to activate`
-              : isPlaying ? '● Auto‑scrolling — select text to highlight on display'
-              : '⏸ Paused — select text to highlight on display'}
-          </span>
-          {voiceMode && <span className="text-violet-400">🎤 Voice tracking active</span>}
-          {mirrorMode && <span className="text-cyan-400">↔️ Horizontal flip active</span>}
-          {flipVertical && <span className="text-cyan-400">↕️ Vertical flip active</span>}
-          {rotation !== 0 && <span className="text-cyan-400">🔄 Rotated {rotation}°</span>}
-          {paragraphMode && <span className="text-indigo-400">📄 Framed by paragraph</span>}
-        </div>
+        {!menuHidden && (
+          <div className="flex items-center gap-4 text-xs text-white/30">
+            <span>
+              {isEditing ? '✏️ Editing — select text to highlight on display'
+                : paragraphMode ? `📄 Paragraph ${paragraphIndex + 1} of ${paragraphs.length} (~300 words each) — click a paragraph in the sidebar to activate`
+                : isPlaying ? '● Auto‑scrolling — select text to highlight on display'
+                : '⏸ Paused — select text to highlight on display'}
+            </span>
+            {voiceMode && <span className="text-violet-400">🎤 Voice tracking active</span>}
+            {mirrorMode && <span className="text-cyan-400">↔️ Horizontal flip active</span>}
+            {flipVertical && <span className="text-cyan-400">↕️ Vertical flip active</span>}
+            {rotation !== 0 && <span className="text-cyan-400">🔄 Rotated {rotation}°</span>}
+            {paragraphMode && <span className="text-indigo-400">📄 Framed by paragraph</span>}
+          </div>
+        )}
       </div>
     </div>
   )
