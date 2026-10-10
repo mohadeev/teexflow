@@ -1,20 +1,59 @@
-import { createClient } from '@/lib/supabase/server'
-import { cookies } from 'next/headers'
+import type { Metadata, Viewport } from 'next'
+import { ClerkProvider } from '@clerk/nextjs'
+import { SITE } from '@/lib/site'
 import './globals.css'
 
-export default async function RootLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
-  const supabase = createClient()
+export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'),
+  title: {
+    default: `${SITE.name} — The teleprompter that follows your voice`,
+    template: `%s · ${SITE.name}`,
+  },
+  description: SITE.description,
+  openGraph: {
+    title: SITE.name,
+    description: SITE.description,
+    siteName: SITE.name,
+    type: 'website',
+  },
+}
 
+export const viewport: Viewport = {
+  themeColor: '#000000',
+  colorScheme: 'dark',
+}
+
+const clerkAppearance = {
+  variables: {
+    colorPrimary: '#0a84ff',
+    colorBackground: '#161618',
+    colorForeground: '#f5f5f7',
+    colorMutedForeground: '#a1a1a6',
+    colorInput: '#1f1f22',
+    colorInputForeground: '#f5f5f7',
+    colorNeutral: '#ffffff',
+    colorBorder: 'rgba(255,255,255,0.1)',
+    colorDanger: '#ff453a',
+    colorSuccess: '#30d158',
+    colorModalBackdrop: 'rgba(0,0,0,0.7)',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", sans-serif',
+    borderRadius: '0.75rem',
+  },
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body>
-        {/* Supabase is available via server-side */}
-        {children}
-      </body>
-    </html>
+    <ClerkProvider
+      appearance={clerkAppearance}
+      signInUrl="/sign-in"
+      signUpUrl="/sign-up"
+      signInFallbackRedirectUrl="/dashboard"
+      signUpFallbackRedirectUrl="/dashboard"
+      afterSignOutUrl="/"
+    >
+      <html lang="en">
+        <body className="min-h-dvh">{children}</body>
+      </html>
+    </ClerkProvider>
   )
 }

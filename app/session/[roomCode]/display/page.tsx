@@ -2,63 +2,49 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import Link from 'next/link'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition'
+import { loadSession } from '@/lib/actions/sessions'
+import { splitIntoParagraphs } from '@/lib/paragraphs'
+import { splitPages } from '@/lib/pages'
+import { regions } from '@/lib/code'
+import { ScriptText } from '@/components/script/ScriptText'
+import { follow, speakableWords } from '@/lib/voiceFollow'
+import { CloseIcon, FlipHIcon, FlipVIcon, RotateIcon, SidebarIcon } from '@/components/icons'
 
-const supabase = createClient()
-
-// 👇 Same lockout window — while the controller is streaming scroll messages,
+// Same lockout window — while the controller is streaming scroll messages,
 // the display's timer keeps resetting, so it stays a pure follower (no echo).
 const REMOTE_SCROLL_LOCKOUT_MS = 500
 
+// Voice follow keeps the line being read this far down the window.
+const VOICE_LINE_POSITION = 0.35
+// The recognizer's transcript is trimmed once it gets this long.
+const MAX_TRANSCRIPT_WORDS = 200
+
 type Segment = {
   text: string
+  // Character offset in the page, so code blocks can be framed by range.
+  start: number
   wordIndex: number | null
   selected: boolean
 }
 
-function splitIntoParagraphs(content: string, targetWords = 300): string[] {
-  if (!content) return []
-  const normalized = content.replace(/\r\n/g, '\n').trim()
-  const sentences = normalized.match(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g) || [normalized]
-  const paragraphs: string[] = []
-  let buffer = ''
-  let bufferWordCount = 0
-  const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
-
-  for (const sentence of sentences) {
-    const sentWords = countWords(sentence)
-    if (sentWords > targetWords) {
-      if (buffer.trim()) { paragraphs.push(buffer.trim()); buffer = ''; bufferWordCount = 0 }
-      const words = sentence.trim().split(/\s+/)
-      for (let i = 0; i < words.length; i += targetWords) {
-        paragraphs.push(words.slice(i, i + targetWords).join(' '))
-      }
-      continue
-    }
-    if (bufferWordCount + sentWords > targetWords && buffer.trim()) {
-      paragraphs.push(buffer.trim()); buffer = ''; bufferWordCount = 0
-    }
-    buffer += (buffer ? ' ' : '') + sentence.trim()
-    bufferWordCount += sentWords
-  }
-  if (buffer.trim()) paragraphs.push(buffer.trim())
-  if (paragraphs.length === 0) {
-    const words = normalized.split(/\s+/).filter(Boolean)
-    for (let i = 0; i < words.length; i += targetWords) {
-      paragraphs.push(words.slice(i, i + targetWords).join(' '))
-    }
-  }
-  return paragraphs
-}
-
 export default function DisplayPage() {
-  const { roomCode } = useParams()
-  const [scriptContent, setScriptContent] = useState<string>('')
+  const { roomCode: rawCode } = useParams()
+  const roomCode = String(rawCode).toUpperCase()
+  // The whole script (all pages); only the current page is shown.
+  const [fullContent, setFullContent] = useState<string>('')
+  const [pageIndex, setPageIndex] = useState(0)
+  const pages = useMemo(() => splitPages(fullContent), [fullContent])
+  const currentPage = Math.min(pageIndex, pages.length - 1)
+  const scriptContent = pages[currentPage] ?? ''
   const [loading, setLoading] = useState(true)
+  const [missing, setMissing] = useState(false)
+  const [voiceUnsupported, setVoiceUnsupported] = useState(false)
+  const pendingScrollRef = useRef<number | null>(null)
 
-  const { send, subscribe, isConnected } = useWebSocket(roomCode as string)
+  const { send, subscribe, isConnected } = useWebSocket(roomCode)
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [speed, setSpeed] = useState(0.7)
@@ -67,7 +53,7 @@ export default function DisplayPage() {
   const animationRef = useRef<number | null>(null)
   const speedRef = useRef(0.7)
 
-  // 👇 Timestamp of the last remote scroll received
+  // Timestamp of the last remote scroll received
   const lastRemoteScrollAtRef = useRef(0)
 
   const [voiceMode, setVoiceMode] = useState(false)
@@ -84,31 +70,37 @@ export default function DisplayPage() {
 
   const [menuHidden, setMenuHidden] = useState(false)
 
-  const wordsRef = useRef<string[]>([])
+  // Voice follow: the last word the speaker said, as a page word index.
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
+  // The same position as an index into `speakable.words`.
+  const voiceCursorRef = useRef(-1)
+  const voiceScrollTargetRef = useRef<number | null>(null)
+  const voiceScrollFrameRef = useRef<number | null>(null)
 
   const {
-    transcript, listening, resetTranscript, browserSupportsSpeechRecognition,
+    transcript, listening, resetTranscript, browserSupportsSpeechRecognition, isMicrophoneAvailable,
   } = useSpeechRecognition()
 
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => { voiceModeRef.current = voiceMode }, [voiceMode])
+  const speakable = useMemo(() => speakableWords(scriptContent), [scriptContent])
+
+  // Ask the controller for its current state whenever we (re)join the room.
+  useEffect(() => {
+    if (isConnected && !loading) send('hello', { from: 'display' })
+  }, [isConnected, loading, send])
 
   // --- Fetch script + settings ---
   useEffect(() => {
-    const fetchScript = async () => {
-      try {
-        const { data: sessionData, error: sessionError } = await supabase
-          .from('sessions')
-          .select('script_id, status, scroll_speed, scroll_percentage, settings')
-          .eq('room_code', roomCode)
-          .maybeSingle()
+    let cancelled = false
+    loadSession(roomCode)
+      .then((snap) => {
+        if (cancelled) return
+        if (!snap) { setMissing(true); setLoading(false); return }
 
-        if (sessionError || !sessionData) { console.error('❌ Session not found'); setLoading(false); return }
+        setIsPlaying(snap.status === 'playing')
 
-        setIsPlaying(sessionData.status === 'playing')
-
-        const s: any = sessionData.settings || {}
+        const s = snap.settings as Record<string, unknown>
         if (typeof s.speed === 'number') { setSpeed(s.speed); speedRef.current = s.speed }
         if (typeof s.mirrorMode === 'boolean') setMirrorMode(s.mirrorMode)
         if (typeof s.flipVertical === 'boolean') setFlipVertical(s.flipVertical)
@@ -119,72 +111,70 @@ export default function DisplayPage() {
         if (typeof s.paragraphMode === 'boolean') setParagraphMode(s.paragraphMode)
         if (typeof s.paragraphIndex === 'number') setParagraphIndex(s.paragraphIndex)
         if (typeof s.menuHidden === 'boolean') setMenuHidden(s.menuHidden)
+        if (typeof s.pageIndex === 'number') setPageIndex(Math.max(0, s.pageIndex))
 
-        console.log('📌 Display loaded settings:', s)
-
-        const { data: scriptData, error: scriptError } = await supabase
-          .from('scripts').select('content').eq('id', sessionData.script_id).maybeSingle()
-
-        if (scriptError || !scriptData) { console.error('❌ Script not found'); setLoading(false); return }
-
-        setScriptContent(scriptData.content)
-        wordsRef.current = scriptData.content.split(/\s+/).filter((w: string) => w.length > 0)
-
-        if (containerRef.current && sessionData.scroll_percentage) {
-          const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
-          containerRef.current.scrollTop = (sessionData.scroll_percentage / 100) * maxScroll
-        }
-
+        setFullContent(snap.content)
+        pendingScrollRef.current = snap.scrollPercentage || null
         setLoading(false)
-      } catch (err) { console.error('❌ Error fetching data:', err); setLoading(false) }
-    }
-    if (roomCode) fetchScript()
+      })
+      .catch(() => { if (!cancelled) { setMissing(true); setLoading(false) } })
+    return () => { cancelled = true }
   }, [roomCode])
+
+  // Restore the saved scroll position once the script is on screen.
+  useEffect(() => {
+    if (loading || pendingScrollRef.current === null || !containerRef.current) return
+    const c = containerRef.current
+    c.scrollTop = (pendingScrollRef.current / 100) * (c.scrollHeight - c.clientHeight)
+    pendingScrollRef.current = null
+  }, [loading])
 
   const paragraphs = useMemo(() => splitIntoParagraphs(scriptContent, 300), [scriptContent])
 
   const paragraphWordRanges = useMemo(() => {
-    let counter = 0
-    return paragraphs.map((p) => {
-      const count = p.split(/\s+/).filter((w) => w.length > 0).length
-      const range = { start: counter, end: counter + count, count }
-      counter += count
-      return range
+    const counts = paragraphs.map((p) => p.split(/\s+/).filter((w) => w.length > 0).length)
+    return counts.map((count, i) => {
+      const start = counts.slice(0, i).reduce((a, b) => a + b, 0)
+      return { start, end: start + count, count }
     })
   }, [paragraphs])
 
   const segments = useMemo<Segment[]>(() => {
     if (!scriptContent) return []
-    const parts = scriptContent.split(/(\s+)/)
     const out: Segment[] = []
     let wIdx = 0
-    let charPos = 0
     const sel = remoteSelection
     const hasSel = !!sel && sel.end > sel.start
 
-    for (const part of parts) {
-      if (part === '') continue
-      const tokenStart = charPos
-      const tokenEnd = charPos + part.length
-      charPos = tokenEnd
-      const isWhitespace = /^\s+$/.test(part)
-      const thisWordIndex = isWhitespace ? null : wIdx
+    // Tokenize each region (prose, code, fence) separately so no token
+    // straddles a code block's edge. Regions split on line breaks, so word
+    // indexes match the voice tracker's.
+    for (const region of regions(scriptContent)) {
+      let charPos = region.start
+      for (const part of scriptContent.slice(region.start, region.end).split(/(\s+)/)) {
+        if (part === '') continue
+        const tokenStart = charPos
+        const tokenEnd = charPos + part.length
+        charPos = tokenEnd
+        const isWhitespace = /^\s+$/.test(part)
+        const thisWordIndex = isWhitespace ? null : wIdx
 
-      const overlaps = hasSel && tokenStart < sel!.end && tokenEnd > sel!.start
-      if (!overlaps) {
-        out.push({ text: part, wordIndex: thisWordIndex, selected: false })
-      } else {
-        const oStart = Math.max(tokenStart, sel!.start)
-        const oEnd = Math.min(tokenEnd, sel!.end)
-        const before = part.slice(0, oStart - tokenStart)
-        const middle = part.slice(oStart - tokenStart, oEnd - tokenStart)
-        const after = part.slice(oEnd - tokenStart)
-        if (before) out.push({ text: before, wordIndex: thisWordIndex, selected: false })
-        if (middle) out.push({ text: middle, wordIndex: thisWordIndex, selected: true })
-        if (after) out.push({ text: after, wordIndex: thisWordIndex, selected: false })
+        const overlaps = hasSel && tokenStart < sel!.end && tokenEnd > sel!.start
+        if (!overlaps) {
+          out.push({ text: part, start: tokenStart, wordIndex: thisWordIndex, selected: false })
+        } else {
+          const oStart = Math.max(tokenStart, sel!.start)
+          const oEnd = Math.min(tokenEnd, sel!.end)
+          const before = part.slice(0, oStart - tokenStart)
+          const middle = part.slice(oStart - tokenStart, oEnd - tokenStart)
+          const after = part.slice(oEnd - tokenStart)
+          if (before) out.push({ text: before, start: tokenStart, wordIndex: thisWordIndex, selected: false })
+          if (middle) out.push({ text: middle, start: oStart, wordIndex: thisWordIndex, selected: true })
+          if (after) out.push({ text: after, start: oEnd, wordIndex: thisWordIndex, selected: false })
+        }
+
+        if (!isWhitespace) wIdx++
       }
-
-      if (!isWhitespace) wIdx++
     }
     return out
   }, [scriptContent, remoteSelection])
@@ -213,61 +203,83 @@ export default function DisplayPage() {
   }, [])
 
   const startVoiceTracking = useCallback(() => {
-    if (!browserSupportsSpeechRecognition) {
-      alert('Your browser does not support speech recognition.'); return
-    }
-    SpeechRecognition.startListening({ continuous: true, language: 'en-US' })
+    if (!browserSupportsSpeechRecognition) { setVoiceUnsupported(true); return }
+    SpeechRecognition.startListening({ continuous: true, interimResults: true, language: navigator.language || 'en-US' })
   }, [browserSupportsSpeechRecognition])
 
   const stopVoiceTracking = useCallback(() => {
     SpeechRecognition.stopListening(); setHighlightedIndex(null)
+    voiceCursorRef.current = -1
   }, [])
 
+  // Browsers end recognition after a silence or a network blip; keep it going
+  // for as long as voice follow is on.
   useEffect(() => {
-    if (!voiceMode || !transcript || transcript.trim() === '') return
-    const heard = transcript.trim().toLowerCase()
-    const scriptWords = wordsRef.current
-    if (scriptWords.length === 0) return
+    if (!voiceMode || listening || voiceUnsupported || !isMicrophoneAvailable) return
+    const t = setTimeout(startVoiceTracking, 300)
+    return () => clearTimeout(t)
+  }, [voiceMode, listening, voiceUnsupported, isMicrophoneAvailable, startVoiceTracking])
 
-    const spokenWords = heard.split(/\s+/)
-    let matchedIndex = -1
-    for (const word of spokenWords) {
-      const idx = scriptWords.findIndex((w) => w.toLowerCase() === word)
-      if (idx !== -1) { matchedIndex = idx; break }
-    }
-    if (matchedIndex === -1) {
-      for (const word of spokenWords) {
-        const idx = scriptWords.findIndex((w) => w.toLowerCase().includes(word))
-        if (idx !== -1) { matchedIndex = idx; break }
+  // A new page or edited script: start following from the top of it again.
+  useEffect(() => { voiceCursorRef.current = -1 }, [scriptContent])
+
+  // Glides the window toward the voice target instead of jumping, and lets
+  // the controller follow along.
+  const glideToVoiceTarget = useCallback(() => {
+    if (voiceScrollFrameRef.current !== null) return
+    const step = () => {
+      const c = containerRef.current
+      const target = voiceScrollTargetRef.current
+      if (!c || target === null) { voiceScrollFrameRef.current = null; return }
+      const diff = target - c.scrollTop
+      if (Math.abs(diff) < 1) {
+        voiceScrollFrameRef.current = null
+        return
       }
+      c.scrollTop += diff * 0.12
+      broadcastScroll(getScrollPercentage())
+      voiceScrollFrameRef.current = requestAnimationFrame(step)
     }
+    voiceScrollFrameRef.current = requestAnimationFrame(step)
+  }, [broadcastScroll])
 
-    if (matchedIndex !== -1) {
-      setHighlightedIndex(matchedIndex)
+  useEffect(() => () => {
+    if (voiceScrollFrameRef.current !== null) cancelAnimationFrame(voiceScrollFrameRef.current)
+  }, [])
 
-      if (paragraphMode) {
-        for (let i = 0; i < paragraphWordRanges.length; i++) {
-          const r = paragraphWordRanges[i]
-          if (matchedIndex >= r.start && matchedIndex < r.end) {
-            if (i !== paragraphIndex) setParagraphIndex(i)
-            break
-          }
-        }
-      } else {
-        const percentage = (matchedIndex / scriptWords.length) * 100
-        if (containerRef.current) {
-          const c = containerRef.current
-          const maxScroll = c.scrollHeight - c.clientHeight
-          c.scrollTop = (percentage / 100) * maxScroll
-          broadcastScroll(percentage)
-          supabase.from('sessions').update({ scroll_percentage: percentage }).eq('room_code', roomCode)
-        }
-      }
+  // Puts page word `wordIndex` at the reading line.
+  const scrollToWord = useCallback((wordIndex: number) => {
+    const c = containerRef.current
+    const el = c?.querySelector<HTMLElement>(`[data-w="${wordIndex}"]`)
+    if (!c || !el) return
+    // offsetTop ignores the mirror/rotate transforms, unlike getBoundingClientRect.
+    let top = 0
+    for (let n: HTMLElement | null = el; n && n !== c; n = n.offsetParent as HTMLElement | null) top += n.offsetTop
+    const max = c.scrollHeight - c.clientHeight
+    voiceScrollTargetRef.current = Math.max(0, Math.min(max, top - c.clientHeight * VOICE_LINE_POSITION))
+    glideToVoiceTarget()
+  }, [glideToVoiceTarget])
+
+  // Follow the speaker: place what was just heard in the script, then move
+  // the highlight and the window (or the paragraph) there.
+  useEffect(() => {
+    if (!voiceMode || !transcript.trim()) return
+    const heard = transcript.trim().split(/\s+/)
+    if (heard.length > MAX_TRANSCRIPT_WORDS) resetTranscript()
+
+    const at = follow(heard, speakable.words, voiceCursorRef.current)
+    if (at === null || at === voiceCursorRef.current) return
+    voiceCursorRef.current = at
+    const wordIndex = speakable.wordIndex[at]
+    setHighlightedIndex(wordIndex)
+
+    if (paragraphMode) {
+      const i = paragraphWordRanges.findIndex((r) => wordIndex >= r.start && wordIndex < r.end)
+      if (i !== -1 && i !== paragraphIndex) setParagraphIndex(i)
     } else {
-      setHighlightedIndex(null)
+      scrollToWord(wordIndex)
     }
-    resetTranscript()
-  }, [transcript, voiceMode, broadcastScroll, resetTranscript, roomCode, paragraphMode, paragraphIndex, paragraphWordRanges])
+  }, [transcript, voiceMode, speakable, resetTranscript, paragraphMode, paragraphIndex, paragraphWordRanges, scrollToWord])
 
   // --- Auto-scroll loop ---
   useEffect(() => {
@@ -287,7 +299,7 @@ export default function DisplayPage() {
       const delta = (time - lastTime) / 1000
       lastTime = time
 
-      // 👇 If a remote scroll just came in, let the controller drive.
+      // If a remote scroll just came in, let the controller drive.
       //    Do NOT advance locally and do NOT broadcast back.
       if (Date.now() - lastRemoteScrollAtRef.current < REMOTE_SCROLL_LOCKOUT_MS) {
         animationRef.current = requestAnimationFrame(step)
@@ -309,7 +321,7 @@ export default function DisplayPage() {
     }
   }, [isPlaying, loading, voiceMode, broadcastScroll, paragraphMode])
 
-  // 👇 Don't echo back while a remote scroll is fresh
+  // Don't echo back while a remote scroll is fresh
   const handleScroll = () => {
     if (isRemoteScrollRef.current) return
     if (Date.now() - lastRemoteScrollAtRef.current < REMOTE_SCROLL_LOCKOUT_MS) return
@@ -333,7 +345,7 @@ export default function DisplayPage() {
       if (payload.from !== 'controller') return
       const active = payload.active
       if (active && !voiceModeRef.current) { setVoiceMode(true); startVoiceTracking() }
-      else if (!active && voiceModeRef.current) { setVoiceMode(false); stopVoiceTracking() }
+      else if (!active && voiceModeRef.current) { setVoiceMode(false); setVoiceUnsupported(false); stopVoiceTracking() }
     })
     const unsubMirror = subscribe('mirror', (payload) => {
       if (payload.from !== 'controller') return
@@ -355,16 +367,27 @@ export default function DisplayPage() {
     const unsubScript = subscribe('script', (payload) => {
       if (payload.from !== 'controller') return
       const currentPct = getScrollPercentage()
-      setScriptContent(payload.content)
-      wordsRef.current = payload.content.split(/\s+/).filter((w: string) => w.length > 0)
+      const receivedAt = Date.now()
+      setFullContent(payload.content)
       setHighlightedIndex(null)
       setRemoteSelection(null)
       requestAnimationFrame(() => {
+        // A scroll from the controller that arrived after the new text wins.
+        if (lastRemoteScrollAtRef.current >= receivedAt) return
         if (containerRef.current) {
           const maxScroll = containerRef.current.scrollHeight - containerRef.current.clientHeight
           containerRef.current.scrollTop = (currentPct / 100) * maxScroll
         }
       })
+    })
+
+    const unsubPage = subscribe('page', (payload) => {
+      if (payload.from !== 'controller' || typeof payload.index !== 'number') return
+      setPageIndex(Math.max(0, payload.index))
+      setHighlightedIndex(null)
+      setRemoteSelection(null)
+      if (containerRef.current) containerRef.current.scrollTop = 0
+      requestAnimationFrame(() => { if (containerRef.current) containerRef.current.scrollTop = 0 })
     })
 
     const unsubSelection = subscribe('selection', (payload) => {
@@ -394,14 +417,24 @@ export default function DisplayPage() {
     return () => {
       unsubScroll(); unsubSpeed(); unsubControl(); unsubVoice()
       unsubMirror(); unsubFlipVertical(); unsubRotation(); unsubWidth()
-      unsubScript(); unsubSelection(); unsubParagraph(); unsubMenu(); unsubRefresh()
+      unsubScript(); unsubPage(); unsubSelection(); unsubParagraph(); unsubMenu(); unsubRefresh()
     }
   }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex items-center justify-center">
-        <p className="text-white/50 text-lg animate-pulse">Loading teleprompter...</p>
+      <div className="flex min-h-dvh items-center justify-center bg-black">
+        <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/15 border-t-ink" aria-label="Loading" />
+      </div>
+    )
+  }
+
+  if (missing) {
+    return (
+      <div className="flex min-h-dvh flex-col items-center justify-center bg-black px-6 text-center">
+        <h1 className="text-[24px] font-semibold tracking-[-0.02em]">No session with code {roomCode}</h1>
+        <p className="mt-2 max-w-[360px] text-[15px] text-ink-2">Check the code on your controller and try again.</p>
+        <Link href="/session" className="btn btn-secondary mt-8">Enter a different code</Link>
       </div>
     )
   }
@@ -424,7 +457,7 @@ export default function DisplayPage() {
   // ========== DISTRACTION-FREE PARAGRAPH VIEW ==========
   if (paragraphMode) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex items-center justify-center p-4 overflow-hidden">
+      <div className="flex min-h-dvh items-center justify-center overflow-hidden bg-black p-4">
         <div
           className="w-full h-[90vh] flex items-center justify-center"
           style={{
@@ -434,26 +467,16 @@ export default function DisplayPage() {
           }}
         >
           <p
-            className="text-center text-5xl md:text-6xl lg:text-7xl font-light leading-tight text-white/95 whitespace-pre-wrap max-w-[1400px]"
+            className="max-w-[1400px] whitespace-pre-wrap text-center text-5xl font-normal leading-tight tracking-[-0.01em] text-ink md:text-6xl lg:text-7xl"
             style={{ width: `${scriptWidth}px`, maxWidth: '90vw' }}
           >
             {currentParagraphWords.length === 0 ? (
-              <span className="text-white/20">—</span>
+              <span className="text-ink-3">—</span>
             ) : (
               currentParagraphWords.map((word, i) => {
                 const globalIdx = currentRange.start + i
-                const voiceHighlighted =
-                  highlightedIndex !== null &&
-                  Math.abs(globalIdx - highlightedIndex) <= 2
                 return (
-                  <span
-                    key={i}
-                    className={`transition-colors duration-200 ${
-                      voiceHighlighted
-                        ? 'text-yellow-300 drop-shadow-[0_0_16px_rgba(253,224,71,0.6)]'
-                        : 'text-white/95'
-                    }`}
-                  >
+                  <span key={i} className={`transition-colors duration-300 ${voiceClass(globalIdx, highlightedIndex) || 'text-ink'}`}>
                     {word}{' '}
                   </span>
                 )
@@ -462,10 +485,11 @@ export default function DisplayPage() {
           </p>
         </div>
 
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 text-[10px] font-mono text-white/15 select-none pointer-events-none">
+        <div className="pointer-events-none fixed bottom-4 left-1/2 -translate-x-1/2 select-none font-mono text-[11px] text-white/20">
+          {pages.length > 1 && `Page ${currentPage + 1}/${pages.length} · `}
           {paragraphs.length === 0 ? '0 / 0' : `${paragraphIndex + 1} / ${paragraphs.length}`}
           {!isConnected && ' · offline'}
-          {voiceMode && ' · 🎤'}
+          {voiceMode && (voiceUnsupported ? ' · voice unsupported in this browser' : !isMicrophoneAvailable ? ' · allow the microphone' : ' · listening')}
         </div>
       </div>
     )
@@ -473,73 +497,49 @@ export default function DisplayPage() {
 
   // ========== NORMAL SCROLLING VIEW ==========
   return (
-    <div className="min-h-screen bg-gradient-to-b from-neutral-950 to-black flex flex-col items-center justify-center p-6">
-      <style jsx>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.03); border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
-      `}</style>
-
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-black p-6">
       <button
         onClick={toggleMenu}
         title={menuHidden ? 'Show status' : 'Hide status'}
-        className="fixed top-4 right-4 z-40 w-8 h-8 rounded-full bg-white/5 backdrop-blur-md border border-white/10 text-white/30 hover:text-white/90 hover:bg-white/15 hover:border-white/25 flex items-center justify-center transition-all duration-200 select-none"
+        aria-label={menuHidden ? 'Show status' : 'Hide status'}
+        className="fixed right-4 top-4 z-40 flex h-9 w-9 select-none items-center justify-center rounded-full text-white/25 transition-colors hover:bg-white/10 hover:text-ink"
       >
-        {menuHidden ? (
-          <span className="text-sm leading-none">ℹ️</span>
-        ) : (
-          <span className="text-sm leading-none">✕</span>
-        )}
+        {menuHidden ? <SidebarIcon size={16} /> : <CloseIcon size={16} />}
       </button>
 
-      <div className="flex flex-col items-center w-full max-w-6xl gap-6">
+      <div className="flex w-full max-w-6xl flex-col items-center gap-6">
         {!menuHidden && (
-          <div className="w-full bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl flex items-center justify-center gap-6 flex-wrap">
-            <span className="text-xs font-medium text-white/60 flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-white/20'}`}></span>
-              {isPlaying ? 'Playing' : 'Paused'}
+          <div className="glass flex flex-wrap items-center justify-center gap-x-4 gap-y-2 rounded-full border border-hairline py-1.5 pl-4 pr-1.5 text-[12px] text-ink-2">
+            <Status dot={isConnected ? 'bg-positive' : 'bg-danger'}>{isConnected ? roomCode : 'Reconnecting…'}</Status>
+            <Status dot={isPlaying ? 'bg-ink' : 'bg-white/25'}>{isPlaying ? 'Playing' : 'Paused'}</Status>
+            {pages.length > 1 && <span className="font-mono">Page {currentPage + 1}/{pages.length}</span>}
+            <span className="font-mono">{speed.toFixed(1)}×</span>
+            {voiceMode && (
+              <Status dot="bg-danger">
+                {voiceUnsupported ? 'Voice needs Chrome, Edge or Safari' : !isMicrophoneAvailable ? 'Allow the microphone' : listening ? 'Listening' : 'Voice'}
+              </Status>
+            )}
+            {hasSelection && <Status dot="bg-caution">Spotlight</Status>}
+            <span className="flex items-center gap-0.5">
+              <MiniToggle
+                active={mirrorMode}
+                label="Mirror horizontally"
+                onClick={() => { const s = !mirrorMode; setMirrorMode(s); send('mirror', { active: s, from: 'display' }) }}
+              ><FlipHIcon size={14} /></MiniToggle>
+              <MiniToggle
+                active={flipVertical}
+                label="Flip vertically"
+                onClick={() => { const s = !flipVertical; setFlipVertical(s); send('flipVertical', { active: s, from: 'display' }) }}
+              ><FlipVIcon size={14} /></MiniToggle>
+              <MiniToggle
+                active={rotation !== 0}
+                label={`Rotate (${rotation}°)`}
+                onClick={() => {
+                  const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
+                  setRotation(next); send('rotation', { degrees: next, from: 'display' })
+                }}
+              ><RotateIcon size={14} /></MiniToggle>
             </span>
-            <span className="text-xs text-white/40">|</span>
-            <span className="text-xs font-medium text-white/60 flex items-center gap-1">
-              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.6)]' : 'bg-red-400'}`}></span>
-              {isConnected ? 'Connected' : 'Disconnected'}
-            </span>
-            <span className="text-xs text-white/40">|</span>
-            <span className="text-xs font-mono text-cyan-300">Speed: {speed.toFixed(2)}x</span>
-            <span className="text-xs text-white/40">|</span>
-            <span className="text-xs font-mono text-cyan-300">Width: {scriptWidth}px</span>
-            {voiceMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-violet-400">🎤 Voice {listening ? '🎧' : ''}</span></>)}
-            {mirrorMode && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↔️ H</span></>)}
-            {flipVertical && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">↕️ V</span></>)}
-            {rotation !== 0 && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-cyan-400">🔄 {rotation}°</span></>)}
-            {hasSelection && (<><span className="text-xs text-white/40">|</span><span className="text-xs font-medium text-red-400">🎯 Focus mode</span></>)}
-
-            <span className="text-xs text-white/40">|</span>
-
-            <button
-              onClick={() => {
-                const s = !mirrorMode; setMirrorMode(s); send('mirror', { active: s, from: 'display' })
-              }}
-              className={`text-xs px-3 py-1 rounded-full transition-colors
-                ${mirrorMode ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
-            >↔️ {mirrorMode ? 'H ON' : 'H OFF'}</button>
-
-            <button
-              onClick={() => {
-                const s = !flipVertical; setFlipVertical(s); send('flipVertical', { active: s, from: 'display' })
-              }}
-              className={`text-xs px-3 py-1 rounded-full transition-colors
-                ${flipVertical ? 'bg-cyan-500/80 text-black hover:bg-cyan-400' : 'bg-white/10 text-white/70 hover:bg-white/20'}`}
-            >↕️ {flipVertical ? 'V ON' : 'V OFF'}</button>
-
-            <button
-              onClick={() => {
-                const next = ((rotation + 90) % 360) as 0 | 90 | 180 | 270
-                setRotation(next); send('rotation', { degrees: next, from: 'display' })
-              }}
-              className="text-xs px-3 py-1 rounded-full bg-white/10 text-white/70 hover:bg-white/20 transition-colors"
-            >🔄 {rotation}°</button>
           </div>
         )}
 
@@ -554,7 +554,7 @@ export default function DisplayPage() {
           <div
             ref={containerRef}
             onScroll={handleScroll}
-            className="bg-neutral-900/80 backdrop-blur-sm border border-white/5 rounded-2xl overflow-y-scroll p-8 text-xl leading-relaxed custom-scrollbar shadow-2xl whitespace-pre-wrap"
+            className="scrollbar-thin relative overflow-y-scroll whitespace-pre-wrap rounded-[22px] border border-hairline bg-surface p-8 text-xl leading-relaxed"
             style={{
               width: `${scriptWidth}px`,
               height: `${containerHeight}px`,
@@ -564,33 +564,80 @@ export default function DisplayPage() {
               flexShrink: 0,
             }}
           >
-            {segments.map((seg, i) => {
-              const voiceHighlighted =
-                !hasSelection &&
-                !seg.selected &&
-                seg.wordIndex !== null &&
-                highlightedIndex !== null &&
-                Math.abs(seg.wordIndex - highlightedIndex) <= 2
+            <ScriptText
+              text={scriptContent}
+              renderRange={(start, end, paint) =>
+                segments.map((seg, i) => {
+                  if (seg.start < start || seg.start >= end) return null
+                  const voice = !hasSelection && !paint && seg.wordIndex !== null && voiceClass(seg.wordIndex, highlightedIndex)
 
-              let cls = 'transition-colors duration-200 '
+                  let cls = 'transition-colors duration-300 '
 
-              if (hasSelection) {
-                if (seg.selected) {
-                  cls += 'bg-red-500/60 text-red-50 rounded-[3px] '
-                } else {
-                  cls += 'text-transparent select-none '
-                }
-              } else if (voiceHighlighted) {
-                cls += 'text-yellow-300 drop-shadow-[0_0_8px_rgba(253,224,71,0.5)] '
-              } else {
-                cls += 'text-white/90 '
+                  if (hasSelection) {
+                    if (seg.selected) {
+                      cls += 'bg-caution text-black rounded-[3px] '
+                    } else {
+                      cls += 'text-transparent select-none '
+                    }
+                  } else if (voice) {
+                    cls += voice
+                  } else if (paint) {
+                    // Code keeps its syntax colors.
+                    return <span key={i} data-w={seg.wordIndex ?? undefined} className={cls}>{paint(seg.text, seg.start)}</span>
+                  } else {
+                    cls += 'text-ink '
+                  }
+
+                  return <span key={i} data-w={seg.wordIndex ?? undefined} className={cls}>{seg.text}</span>
+                })
               }
-
-              return <span key={i} className={cls}>{seg.text}</span>
-            })}
+            />
           </div>
         </div>
       </div>
     </div>
+  )
+}
+
+// Voice follow colors: words already said fade, the next few light up.
+function voiceClass(wordIndex: number, said: number | null) {
+  if (said === null) return ''
+  if (wordIndex <= said) return 'text-ink/35 '
+  if (wordIndex <= said + 3) return 'text-caution '
+  return ''
+}
+
+function Status({ dot, children }: { dot: string; children: React.ReactNode }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+      {children}
+    </span>
+  )
+}
+
+function MiniToggle({
+  active,
+  label,
+  onClick,
+  children,
+}: {
+  active: boolean
+  label: string
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      title={label}
+      aria-label={label}
+      className={`flex h-7 w-7 items-center justify-center rounded-full transition-colors ${
+        active ? 'bg-ink text-black' : 'text-ink-2 hover:bg-white/10 hover:text-ink'
+      }`}
+    >
+      {children}
+    </button>
   )
 }

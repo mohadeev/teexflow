@@ -14,14 +14,12 @@ export function useWebSocket(roomCode: string | null | undefined) {
     if (!roomCode || typeof window === 'undefined') return
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // 👇 Path changed to /api/websocket
     const ws = new WebSocket(
       `${protocol}//${window.location.host}/api/websocket?room=${roomCode}`
     )
     socketRef.current = ws
 
     ws.onopen = () => {
-      console.log('🔗 WebSocket connected')
       setIsConnected(true)
     }
 
@@ -37,7 +35,6 @@ export function useWebSocket(roomCode: string | null | undefined) {
     }
 
     ws.onclose = () => {
-      console.log('🔌 WebSocket disconnected')
       setIsConnected(false)
     }
 

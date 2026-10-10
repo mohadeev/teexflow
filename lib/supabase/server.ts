@@ -1,27 +1,16 @@
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
+import 'server-only'
+import { createClient } from '@supabase/supabase-js'
+import { SUPABASE_URL } from './env'
 
-export async function createClient() {
-  const cookieStore = await cookies()
-  
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll()
-        },
-        setAll(cookiesToSet) {
-          try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            )
-          } catch {
-            // Ignore
-          }
-        },
-      },
-    }
-  )
+let admin: ReturnType<typeof createClient> | null = null
+
+// All database access happens on the server with the secret key. Users are
+// identified by their Clerk user id, which every query filters on explicitly.
+export function db() {
+  if (!admin) {
+    const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (!key) throw new Error('SUPABASE_SECRET_KEY is not set')
+    admin = createClient(SUPABASE_URL, key, { auth: { persistSession: false } })
+  }
+  return admin
 }

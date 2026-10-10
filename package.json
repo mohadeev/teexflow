@@ -21,6 +21,7 @@
     "clsx": "^2.1.1",
     "concurrently": "^10.0.5",
     "express": "^5.2.1",
+    "highlight.js": "^11.11.1",
     "next": "16.2.10",
     "next-ws": "^2.2.15",
     "openai": "^6.46.0",
@@ -29,6 +30,7 @@
     "react-fast-marquee": "^1.6.5",
     "react-marquee-text": "^1.0.6",
     "react-speech-recognition": "^4.0.1",
+    "stripe": "^18.5.0",
     "tailwind-merge": "^3.6.0",
     "ws": "^8.21.3"
   },
