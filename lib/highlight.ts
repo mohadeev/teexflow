@@ -9,9 +9,17 @@ const AUTO = [
 // highlight.js calls HTML "xml".
 const label = (lang?: string) => (lang === 'xml' ? 'html' : lang ?? '')
 
+// Markup is easy to spot but auto-detection often calls it something else
+// (a list of <input> tags comes out as Python): mostly-tag code is HTML.
+function looksLikeMarkup(code: string) {
+  const lines = code.split('\n').map((l) => l.trim()).filter(Boolean)
+  return lines.length > 0 && lines.filter((l) => /^<[!/a-zA-Z]/.test(l)).length >= lines.length * 0.6
+}
+
 export function highlight(code: string, lang: string) {
+  if (!lang && looksLikeMarkup(code)) lang = 'xml'
   if (lang && hljs.getLanguage(lang)) {
-    return { html: hljs.highlight(code, { language: lang, ignoreIllegals: true }).value, detected: lang }
+    return { html: hljs.highlight(code, { language: lang, ignoreIllegals: true }).value, detected: label(lang) }
   }
   if (!code.trim()) return { html: '', detected: '' }
   const result = hljs.highlightAuto(code, AUTO)
@@ -19,7 +27,7 @@ export function highlight(code: string, lang: string) {
 }
 
 export function detectLanguage(code: string) {
-  return label(hljs.highlightAuto(code, AUTO).language)
+  return looksLikeMarkup(code) ? 'html' : label(hljs.highlightAuto(code, AUTO).language)
 }
 
 export type SyntaxRange = { start: number; end: number; cls: string }

@@ -3,18 +3,19 @@
 import { Fragment, useMemo, type ReactNode } from 'react'
 import { languageName, regions } from '@/lib/code'
 import { highlightRanges, type SyntaxRange } from '@/lib/highlight'
+import { formatProse } from '@/lib/proseFormat'
 import { PrompterCode } from './CodeFrame'
 
 // Colors a piece of code that starts at page offset `at`.
 export type Paint = (text: string, at: number) => ReactNode
 
-// A page as the prompter shows it: prose as-is, code (fenced or detected)
-// framed and colored, fence lines hidden. `renderRange` draws the characters
+// A page as the prompter shows it: prose with a line per sentence, code
+// (fenced or detected) framed and colored, fence lines hidden. `renderRange` draws the characters
 // in [start, end); inside code it gets `paint` for syntax colors.
 export function ScriptText({
   text,
   copy = false,
-  renderRange = (start, end, paint) => (paint ? paint(text.slice(start, end), start) : text.slice(start, end)),
+  renderRange = (start, end, paint) => (paint ? paint(text.slice(start, end), start) : formatProse(text.slice(start, end))),
 }: {
   text: string
   // Show a copy button on code blocks (not on the camera-facing display).

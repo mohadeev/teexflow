@@ -1,5 +1,7 @@
 import 'server-only'
 import { db } from './supabase/server'
+import { userIsPro } from './billing'
+import { FREE_SCRIPT_LIMIT } from './plans'
 
 export type ScriptRow = {
   id: string
@@ -36,4 +38,25 @@ export async function countScripts(userId: string) {
     .select('id', { count: 'exact', head: true })
     .eq('user_id', userId)
   return count ?? 0
+}
+
+export type CreateResult = { ok: true; id: string } | { ok: false; error: string; code?: 'limit' }
+
+// Creates a script for `userId`, keeping to the Free plan's script limit.
+// Callers must have checked who `userId` is.
+export async function createScriptFor(userId: string, title: string, content: string): Promise<CreateResult> {
+  if (!(await userIsPro(userId)) && (await countScripts(userId)) >= FREE_SCRIPT_LIMIT) {
+    return {
+      ok: false,
+      code: 'limit',
+      error: `The Free plan includes ${FREE_SCRIPT_LIMIT} scripts. Upgrade to Pro for unlimited scripts.`,
+    }
+  }
+  const { data, error } = await db()
+    .from('scripts')
+    .insert({ user_id: userId, title, content } as never)
+    .select('id')
+    .single()
+  if (error || !data) return { ok: false, error: error?.message ?? 'Could not create script' }
+  return { ok: true, id: (data as { id: string }).id }
 }

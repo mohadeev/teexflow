@@ -17,11 +17,12 @@ export function LogoMark({ size = 22 }: { size?: number }) {
   )
 }
 
-export function Logo({ href = '/' }: { href?: string }) {
+// `compact` shows only the mark on phones, to leave room in the app header.
+export function Logo({ href = '/', compact = false }: { href?: string; compact?: boolean }) {
   return (
-    <Link href={href} className="flex items-center gap-2 text-[17px] font-semibold tracking-[-0.02em] text-ink">
+    <Link href={href} aria-label="TeexFlow" className="flex shrink-0 items-center gap-2 text-[17px] font-semibold tracking-[-0.02em] text-ink">
       <LogoMark />
-      TeexFlow
+      <span className={compact ? 'hidden sm:inline' : undefined}>TeexFlow</span>
     </Link>
   )
 }

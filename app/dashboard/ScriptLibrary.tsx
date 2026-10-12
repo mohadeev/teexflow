@@ -1,11 +1,11 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { useRef, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createScript, deleteScript, startSession } from '@/lib/actions/scripts'
 import { Dialog } from '@/components/app/Dialog'
-import { DocIcon, PlayIcon, PlusIcon, TrashIcon } from '@/components/icons'
+import { DocIcon, PlayIcon, PlusIcon, TrashIcon, UploadIcon } from '@/components/icons'
 
 type Item = { id: string; title: string; excerpt: string; words: number; pages: number; updatedAt: string }
 
@@ -37,6 +37,35 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
   const [error, setError] = useState<string | null>(null)
 
   const atLimit = !pro && scripts.length >= limit
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [importing, setImporting] = useState<string | null>(null)
+  const [dragging, setDragging] = useState(false)
+
+  // Uploads a PDF or text file; the server turns it into a new script.
+  const importFile = async (file: File) => {
+    if (atLimit) return setLimitOpen(true)
+    setError(null)
+    setImporting(file.name)
+    try {
+      const body = new FormData()
+      body.append('file', file)
+      const res = await fetch('/api/scripts/import', { method: 'POST', body })
+      const data = (await res.json().catch(() => null)) as { ok: boolean; id?: string; error?: string; code?: string } | null
+      if (data?.ok && data.id) return router.push(`/dashboard/scripts/${data.id}`)
+      if (data?.code === 'limit') setLimitOpen(true)
+      else setError(data?.error ?? 'The import failed. Please try again.')
+    } catch {
+      setError('The import failed. Check your connection and try again.')
+    }
+    setImporting(null)
+  }
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragging(false)
+    const file = e.dataTransfer.files[0]
+    if (file) importFile(file)
+  }
 
   const onNew = () => {
     if (atLimit) return setLimitOpen(true)
@@ -74,7 +103,36 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
   }
 
   return (
-    <main className="mx-auto max-w-[1080px] px-5 pb-24 pt-12">
+    <main
+      className="relative mx-auto max-w-[1080px] px-5 pb-24 pt-12"
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes('Files')) return
+        e.preventDefault()
+        setDragging(true)
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false)
+      }}
+      onDrop={onDrop}
+    >
+      {dragging && (
+        <div className="pointer-events-none absolute inset-2 z-30 flex flex-col items-center justify-center rounded-[26px] border-2 border-dashed border-accent bg-black/80 text-center backdrop-blur-sm">
+          <UploadIcon size={30} className="text-link" />
+          <p className="mt-3 text-[17px] font-semibold">Drop to import</p>
+          <p className="mt-1 text-[13px] text-ink-2">PDF, .txt or .md — it becomes a new script</p>
+        </div>
+      )}
+      <input
+        ref={fileInput}
+        type="file"
+        accept=".pdf,.txt,.md,.markdown,.text,application/pdf,text/plain,text/markdown"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ''
+          if (file) importFile(file)
+        }}
+      />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="headline text-[34px] leading-tight">Scripts</h1>
@@ -97,10 +155,23 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
             </p>
           )}
         </div>
-        <button onClick={onNew} disabled={pending && !busyId} className="btn btn-primary">
-          <PlusIcon size={16} strokeWidth={2.2} /> New Script
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => (atLimit ? setLimitOpen(true) : fileInput.current?.click())}
+            disabled={!!importing}
+            title="Import a PDF or text file"
+            className="btn btn-secondary"
+          >
+            <UploadIcon size={16} /> {importing ? 'Importing…' : 'Import'}
+          </button>
+          <button onClick={onNew} disabled={(pending && !busyId) || !!importing} className="btn btn-primary">
+            <PlusIcon size={16} strokeWidth={2.2} /> New Script
+          </button>
+        </div>
       </div>
+      {importing && (
+        <p className="mt-6 text-[14px] text-ink-2" aria-live="polite">Reading “{importing}”…</p>
+      )}
 
       {error && (
         <div className="mt-6 flex items-center justify-between rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-[14px] text-danger">
@@ -115,12 +186,17 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
             <DocIcon size={26} />
           </span>
           <h2 className="mt-5 text-[21px] font-semibold tracking-[-0.02em]">Write your first script</h2>
-          <p className="mt-2 max-w-[340px] text-[15px] text-ink-2">
-            Paste something you’re about to record, then press Present to put it on screen.
+          <p className="mt-2 max-w-[360px] text-[15px] text-ink-2">
+            Paste something you’re about to record, or import a PDF or text file, then press Present to put it on screen.
           </p>
-          <button onClick={onNew} disabled={pending} className="btn btn-primary mt-7">
-            <PlusIcon size={16} strokeWidth={2.2} /> New Script
-          </button>
+          <div className="mt-7 flex items-center gap-2">
+            <button onClick={() => fileInput.current?.click()} disabled={!!importing} className="btn btn-secondary">
+              <UploadIcon size={16} /> Import file
+            </button>
+            <button onClick={onNew} disabled={pending || !!importing} className="btn btn-primary">
+              <PlusIcon size={16} strokeWidth={2.2} /> New Script
+            </button>
+          </div>
         </div>
       ) : (
         <ul className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

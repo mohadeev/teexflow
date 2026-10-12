@@ -10,12 +10,15 @@ export const metadata: Metadata = {
     template: `%s · ${SITE.name}`,
   },
   description: SITE.description,
+  applicationName: SITE.name,
   openGraph: {
     title: SITE.name,
     description: SITE.description,
     siteName: SITE.name,
     type: 'website',
+    locale: 'en_US',
   },
+  twitter: { card: 'summary_large_image', title: SITE.name, description: SITE.description },
 }
 
 export const viewport: Viewport = {

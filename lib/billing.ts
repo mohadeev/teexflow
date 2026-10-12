@@ -1,6 +1,7 @@
 import 'server-only'
 import { db } from './supabase/server'
 import { stripeConfigured } from './stripe'
+import { getAccess } from './access'
 
 export type SubscriptionRow = {
   stripe_customer_id: string | null
@@ -12,7 +13,14 @@ export type SubscriptionRow = {
 }
 
 export type BillingSummary = {
+  // Full access, from a subscription, an admin grant, or being an admin.
   pro: boolean
+  // A paid (or trialing) Stripe subscription.
+  subscribed: boolean
+  // Full access that doesn't come from a subscription.
+  access: 'admin' | 'grant' | null
+  // Unix ms: when a grant ends.
+  grantUntil: number | null
   trial: boolean
   // Unix ms: when the trial or current period ends.
   periodEnd: number | null
@@ -36,13 +44,21 @@ export async function getSubscriptionRow(userId: string) {
 const isActive = (status?: string) => status === 'active' || status === 'trialing'
 
 export async function userIsPro(userId: string) {
-  return isActive((await getSubscriptionRow(userId))?.status)
+  const [row, access] = await Promise.all([getSubscriptionRow(userId), getAccess(userId).catch(() => null)])
+  return isActive(row?.status) || !!access?.admin || !!access?.grantUntil
 }
 
 export async function getBillingSummary(userId: string): Promise<BillingSummary> {
-  const row = await getSubscriptionRow(userId).catch(() => null)
+  const [row, extra] = await Promise.all([
+    getSubscriptionRow(userId).catch(() => null),
+    getAccess(userId).catch(() => null),
+  ])
+  const access = extra?.admin ? 'admin' : extra?.grantUntil ? 'grant' : null
   return {
-    pro: isActive(row?.status),
+    pro: isActive(row?.status) || !!access,
+    subscribed: isActive(row?.status),
+    access,
+    grantUntil: extra?.grantUntil ?? null,
     trial: row?.status === 'trialing',
     periodEnd: row?.current_period_end ? new Date(row.current_period_end).getTime() : null,
     interval: row?.interval === 'yearly' ? 'annual' : row?.interval ? 'month' : null,

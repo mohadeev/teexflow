@@ -78,6 +78,9 @@ export const RefreshIcon = (p: IconProps) => (
 export const CopyIcon = (p: IconProps) => (
   <Icon {...p}><rect x="8.5" y="8.5" width="12" height="12" rx="2.5" /><path d="M15.5 8.5V6a2.5 2.5 0 0 0-2.5-2.5H6A2.5 2.5 0 0 0 3.5 6v7A2.5 2.5 0 0 0 6 15.5h2.5" /></Icon>
 )
+export const UploadIcon = (p: IconProps) => (
+  <Icon {...p}><path d="M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5M4.5 14.5v3a2.5 2.5 0 0 0 2.5 2.5h10a2.5 2.5 0 0 0 2.5-2.5v-3" /></Icon>
+)
 export const CodeIcon = (p: IconProps) => (
   <Icon {...p}><path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" /></Icon>
 )

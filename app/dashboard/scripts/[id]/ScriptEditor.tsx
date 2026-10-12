@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { saveScript, startSession } from '@/lib/actions/scripts'
-import { ChevronLeftIcon, PlayIcon, PlusIcon, TrashIcon } from '@/components/icons'
+import { ChevronLeftIcon, MonitorIcon, PhoneIcon, PlayIcon, PlusIcon, TrashIcon } from '@/components/icons'
+import { useLinkedDisplays } from '@/hooks/useLinkedDevices'
 import { Dialog } from '@/components/app/Dialog'
 import { readMinutes, wordCount } from '@/lib/text'
 import { joinPages, splitPages } from '@/lib/pages'
@@ -103,6 +104,8 @@ export function ScriptEditor({
   }
 
   const words = wordCount(content)
+  // Displays on standby, signed in to the same account.
+  const { displays } = useLinkedDisplays()
 
   return (
     <div className="flex min-h-[calc(100dvh-52px)] flex-col">
@@ -116,9 +119,37 @@ export function ScriptEditor({
               <button onClick={flush} className="text-danger">Couldn’t save · Retry</button>
             ) : 'Saved'}
           </span>
-          <button onClick={onPresent} disabled={presenting || words === 0} className="btn btn-sm btn-primary">
-            <PlayIcon size={12} /> {presenting ? 'Starting…' : 'Present'}
-          </button>
+          <div className="flex items-center gap-1">
+            <Link
+              href="/session?as=display"
+              onClick={() => timer.current && flush()}
+              title="Join a session as the display, with its room code"
+              className="btn btn-sm btn-ghost px-2.5"
+            >
+              <MonitorIcon size={15} /> <span className="hidden md:inline">Join as display</span>
+            </Link>
+            <Link
+              href="/session?as=controller"
+              onClick={() => timer.current && flush()}
+              title="Join a session as the controller, with its room code"
+              className="btn btn-sm btn-ghost px-2.5"
+            >
+              <PhoneIcon size={15} /> <span className="hidden md:inline">Join as controller</span>
+            </Link>
+            <button
+              onClick={onPresent}
+              disabled={presenting || words === 0}
+              title={
+                displays
+                  ? 'Show this script on your display and open the controls'
+                  : 'Start presenting. To show it on another screen, open TeexFlow there and choose Display.'
+              }
+              className="btn btn-sm btn-primary ml-1"
+            >
+              {displays > 0 && <span className="h-1.5 w-1.5 rounded-full bg-white" aria-label="Display ready" />}
+              <PlayIcon size={12} /> {presenting ? 'Starting…' : 'Display it'}
+            </button>
+          </div>
         </div>
       </div>
 

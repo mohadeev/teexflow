@@ -48,10 +48,11 @@ export default function PrivacyPage() {
 
         <h2>Voice tracking and your microphone</h2>
         <p>
-          Voice tracking uses the speech recognition built into your web browser. Audio is processed by your browser —
-          and, depending on the browser, by its vendor (for example Google for Chrome, or Apple for Safari) under their
-          own privacy terms. {SITE.name} does not record, receive or store your audio. Only the position in your script
-          is shared between your connected screens.
+          Voice tracking recognizes speech entirely on your device, using OpenAI’s open-source Whisper model running in
+          your browser. Your audio never leaves your device: it is not sent to {SITE.name}, OpenAI, your browser’s vendor
+          or anyone else, and it is not recorded or stored. The first time you use it, your browser downloads the speech
+          model from Hugging Face and keeps it for next time. Only the position in your script is shared between your
+          connected screens.
         </p>
 
         <h2>How we use your data</h2>

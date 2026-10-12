@@ -23,6 +23,9 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   const periodEnd = billing.periodEnd ? dateFmt.format(new Date(billing.periodEnd)) : null
   const price = billing.interval === 'annual' ? `$${PLANS.pro.yearly}/year` : `$${PLANS.pro.monthly}/month`
   const daysLeft = trial && billing.periodEnd ? daysUntil(billing.periodEnd) : null
+  // Full access from being an admin or an admin's grant, without a subscription.
+  const granted = !billing.subscribed && billing.access
+  const grantEnd = billing.grantUntil ? dateFmt.format(new Date(billing.grantUntil)) : null
 
   return (
     <main className="mx-auto max-w-[1080px] px-5 pb-24 pt-12">
@@ -47,6 +50,11 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
             <p className="eyebrow">Current plan</p>
             <h2 className="mt-2 flex flex-wrap items-center gap-3 text-[28px] font-semibold tracking-[-0.03em]">
               {pro ? PLANS.pro.name : PLANS.free.name}
+              {granted && (
+                <span className="rounded-full bg-accent/15 px-2.5 py-1 text-[12px] font-semibold tracking-normal text-link">
+                  {granted === 'admin' ? 'Admin' : 'Full access'}
+                </span>
+              )}
               {trial && daysLeft !== null && (
                 <span className="rounded-full bg-accent/15 px-2.5 py-1 text-[12px] font-semibold tracking-normal text-link">
                   Free trial · {daysLeft} {daysLeft === 1 ? 'day' : 'days'} left
@@ -54,15 +62,19 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
               )}
             </h2>
             <p className="mt-1 text-[14px] text-ink-2">
-              {pro
-                ? billing.canceled
-                  ? trial
-                    ? `Trial ends ${periodEnd}. You won’t be charged.`
-                    : `Cancels on ${periodEnd}. You keep Pro until then.`
-                  : trial
-                    ? `Trial ends ${periodEnd}, then ${price}. Cancel anytime before to pay nothing.`
-                    : `${price}${periodEnd ? ` · Renews ${periodEnd}` : ''}`
-                : `${scripts} of ${FREE_SCRIPT_LIMIT} scripts used`}
+              {granted === 'admin'
+                ? 'Full access to everything, for good.'
+                : granted
+                  ? `Full access until ${grantEnd}, given by the TeexFlow team.`
+                  : pro
+                    ? billing.canceled
+                      ? trial
+                        ? `Trial ends ${periodEnd}. You won’t be charged.`
+                        : `Cancels on ${periodEnd}. You keep Pro until then.`
+                      : trial
+                        ? `Trial ends ${periodEnd}, then ${price}. Cancel anytime before to pay nothing.`
+                        : `${price}${periodEnd ? ` · Renews ${periodEnd}` : ''}`
+                    : `${scripts} of ${FREE_SCRIPT_LIMIT} scripts used`}
             </p>
             {billing.pastDue && (
               <p className="mt-3 text-[14px] text-caution">Your last payment failed. Update your card to keep Pro.</p>
@@ -70,7 +82,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
           </div>
           {(pro || billing.pastDue) && billing.hasCustomer && <ManageSubscription />}
         </div>
-        {pro && (
+        {billing.subscribed && (
           <p className="mt-6 border-t border-hairline pt-5 text-[13px] text-ink-3">
             Change your card, switch between monthly and yearly, see invoices, or cancel — all from Manage subscription.
           </p>

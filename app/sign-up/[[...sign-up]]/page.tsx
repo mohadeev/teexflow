@@ -3,7 +3,7 @@ import Link from 'next/link'
 import { SignUp } from '@clerk/nextjs'
 import { AuthShell } from '@/components/auth/AuthShell'
 
-export const metadata: Metadata = { title: 'Create your account' }
+export const metadata: Metadata = { title: 'Create your account', robots: { index: false } }
 
 export default function SignUpPage() {
   return (
@@ -16,7 +16,7 @@ export default function SignUpPage() {
         </>
       }
     >
-      <SignUp />
+      <SignUp fallbackRedirectUrl="/start" signInFallbackRedirectUrl="/start" />
     </AuthShell>
   )
 }

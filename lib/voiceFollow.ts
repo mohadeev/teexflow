@@ -120,3 +120,27 @@ export function follow(heard: string[], script: string[], cursor: number): numbe
   }
   return best ? (best as { at: number }).at : null
 }
+
+// Common words per language, to tell which language a script is written in.
+const STOPWORDS: Record<string, string[]> = {
+  en: ['the', 'and', 'you', 'to', 'is', 'it', 'this', 'that', 'of', 'we', 'your', 'with', 'for', 'are', 'what'],
+  es: ['el', 'la', 'los', 'las', 'que', 'y', 'es', 'por', 'para', 'con', 'una', 'del', 'pero', 'como', 'esto'],
+  fr: ['le', 'les', 'et', 'est', 'des', 'une', 'pour', 'vous', 'nous', 'dans', 'pas', 'qui', 'sur', 'avec', 'cest'],
+  de: ['der', 'die', 'das', 'und', 'ist', 'nicht', 'ich', 'sie', 'wir', 'mit', 'ein', 'eine', 'zu', 'auf', 'den'],
+  it: ['il', 'di', 'che', 'per', 'non', 'sono', 'gli', 'della', 'questo', 'come', 'anche', 'una', 'con', 'ma', 'nel'],
+  pt: ['o', 'os', 'que', 'do', 'da', 'em', 'um', 'uma', 'para', 'com', 'nao', 'voce', 'mais', 'como', 'isso'],
+}
+const DEFAULT_REGION: Record<string, string> = { en: 'en-US', es: 'es-ES', fr: 'fr-FR', de: 'de-DE', it: 'it-IT', pt: 'pt-BR' }
+
+// The speech-recognition language for a script: the language its words are
+// in, using the browser's regional variant when it matches (en-GB, es-MX…).
+// Listening in the wrong language makes every word come out wrong.
+export function scriptLanguage(words: string[]) {
+  const counts = Object.fromEntries(Object.keys(STOPWORDS).map((l) => [l, 0]))
+  const sets = Object.entries(STOPWORDS).map(([l, list]) => [l, new Set(list)] as const)
+  for (const w of words.slice(0, 2000)) for (const [l, set] of sets) if (set.has(w)) counts[l]++
+  const [best, hits] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]
+  const lang = hits >= 3 ? best : 'en'
+  const browser = typeof navigator !== 'undefined' ? navigator.language : ''
+  return browser.toLowerCase().startsWith(lang + '-') ? browser : DEFAULT_REGION[lang]
+}

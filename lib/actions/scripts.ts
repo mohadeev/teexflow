@@ -4,9 +4,8 @@ import { auth } from '@clerk/nextjs/server'
 import { revalidatePath } from 'next/cache'
 import { randomInt } from 'node:crypto'
 import { db } from '@/lib/supabase/server'
-import { countScripts, getScript } from '@/lib/data'
-import { userIsPro } from '@/lib/billing'
-import { FREE_SCRIPT_LIMIT } from '@/lib/plans'
+import { createScriptFor, getScript, listScripts } from '@/lib/data'
+import { wordCount } from '@/lib/text'
 
 type Result<T = object> = ({ ok: true } & T) | { ok: false; error: string; code?: 'limit' | 'auth' }
 
@@ -18,24 +17,38 @@ async function requireUser() {
 
 export async function createScript(): Promise<Result<{ id: string }>> {
   const userId = await requireUser()
+  const res = await createScriptFor(userId, 'Untitled Script', '')
+  if (res.ok) revalidatePath('/dashboard')
+  return res
+}
 
-  if (!(await userIsPro(userId)) && (await countScripts(userId)) >= FREE_SCRIPT_LIMIT) {
-    return {
-      ok: false,
-      code: 'limit',
-      error: `The Free plan includes ${FREE_SCRIPT_LIMIT} scripts. Upgrade to Pro for unlimited scripts.`,
-    }
+export type ScriptChoice = { id: string; title: string; words: number }
+
+// The signed-in user's scripts, newest first, for picking one to present,
+// and which one the account's room is showing now (if it has a room).
+export async function listScriptChoices(): Promise<
+  Result<{ scripts: ScriptChoice[]; live: { roomCode: string; scriptId: string } | null }>
+> {
+  const userId = await requireUser()
+  const rows = await listScripts(userId).catch(() => null)
+  if (!rows) return { ok: false, error: 'Could not load your scripts.' }
+  let live = null
+  if (rows.length) {
+    const { data } = await db()
+      .from('sessions')
+      .select('room_code, script_id')
+      .in('script_id', rows.map((r) => r.id))
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    const room = data as { room_code: string; script_id: string } | null
+    if (room) live = { roomCode: room.room_code, scriptId: room.script_id }
   }
-
-  const { data, error } = await db()
-    .from('scripts')
-    .insert({ user_id: userId, title: 'Untitled Script', content: '' } as never)
-    .select('id')
-    .single()
-  if (error || !data) return { ok: false, error: error?.message ?? 'Could not create script' }
-
-  revalidatePath('/dashboard')
-  return { ok: true, id: (data as { id: string }).id }
+  return {
+    ok: true,
+    scripts: rows.map((r) => ({ id: r.id, title: r.title || 'Untitled Script', words: wordCount(r.content ?? '') })),
+    live,
+  }
 }
 
 export async function saveScript(

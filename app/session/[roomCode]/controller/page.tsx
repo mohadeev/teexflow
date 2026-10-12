@@ -4,11 +4,13 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { useWebSocket } from '@/hooks/useWebSocket'
+import { useLinkedDisplays } from '@/hooks/useLinkedDevices'
 import { loadSession, updateSession } from '@/lib/actions/sessions'
 import { saveScript } from '@/lib/actions/scripts'
 import { splitIntoParagraphs } from '@/lib/paragraphs'
 import { replacePage, splitPages } from '@/lib/pages'
 import { ScriptText } from '@/components/script/ScriptText'
+import { formatProse } from '@/lib/proseFormat'
 import { Dialog } from '@/components/app/Dialog'
 import {
   CheckIcon,
@@ -81,6 +83,16 @@ export default function ControllerPage() {
   const [copied, setCopied] = useState(false)
 
   const { send, subscribe, isConnected } = useWebSocket(roomCode)
+  // The script this room shows. Another device can switch the room to another
+  // script (joining by script); then this reloads.
+  const [scriptId, setScriptId] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+  // Displays signed in to the same account open this session by themselves.
+  const linked = useLinkedDisplays(
+    loadState === 'ready' ? roomCode : null,
+    scriptId,
+    useCallback(() => setReloadKey((k) => k + 1), [])
+  )
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [speed, setSpeed] = useState(0.7)
@@ -138,6 +150,7 @@ export default function ControllerPage() {
         if (!snap.isOwner) return setLoadState('forbidden')
 
         scriptIdRef.current = snap.scriptId
+        setScriptId(snap.scriptId)
         setIsPro(snap.isPro)
         setScriptTitle(snap.title)
         setIsPlaying(snap.status === 'playing')
@@ -177,7 +190,7 @@ export default function ControllerPage() {
       })
       .catch(() => !cancelled && setLoadState('missing'))
     return () => { cancelled = true }
-  }, [roomCode])
+  }, [roomCode, reloadKey])
 
   // Restore the saved scroll position once the script is on screen.
   useEffect(() => {
@@ -660,6 +673,15 @@ export default function ControllerPage() {
               >
                 <MonitorIcon size={15} /> Open display
               </a>
+              {linked.displays > 0 && (
+                <span
+                  className="hidden items-center gap-1.5 rounded-full bg-positive/10 px-2.5 py-1 text-[12px] text-positive md:flex"
+                  title="Displays signed in to your account show this script"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-positive" />
+                  {linked.displays === 1 ? 'Display linked' : `${linked.displays} displays linked`}
+                </span>
+              )}
             </div>
 
             <button onClick={toggleMenu} title="Hide controls (H)" className="btn btn-sm btn-ghost px-2.5" aria-label="Hide controls">
@@ -834,7 +856,7 @@ export default function ControllerPage() {
                 style={{ width: `${scriptWidth}px`, transition: 'width 100ms ease-out' }}
               >
                 <p className="text-xl font-light leading-relaxed">
-                  {paragraphs[paragraphIndex] || <span className="text-ink-3">No paragraph</span>}
+                  {paragraphs[paragraphIndex] ? formatProse(paragraphs[paragraphIndex]) : <span className="text-ink-3">No paragraph</span>}
                 </p>
               </div>
             </div>

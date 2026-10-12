@@ -12,6 +12,16 @@ const COLUMNS = [
     ],
   },
   {
+    title: 'Use cases',
+    links: [
+      { href: '/teleprompter-for-coding-tutorials', label: 'Coding tutorials' },
+      { href: '/pdf-teleprompter', label: 'PDF teleprompter' },
+      { href: '/voice-activated-teleprompter', label: 'Voice teleprompter' },
+      { href: '/phone-teleprompter-remote', label: 'Phone remote' },
+      { href: '/guides', label: 'Guides' },
+    ],
+  },
+  {
     title: 'Account',
     links: [
       { href: '/sign-up', label: 'Create account' },
@@ -33,8 +43,8 @@ export function SiteFooter() {
   return (
     <footer className="border-t border-hairline bg-surface/40">
       <div className="mx-auto max-w-[1080px] px-5 py-14">
-        <div className="grid gap-10 sm:grid-cols-[1.4fr_1fr_1fr_1fr]">
-          <div>
+        <div className="grid grid-cols-2 gap-10 sm:grid-cols-[1.4fr_1fr_1fr_1fr_1fr]">
+          <div className="col-span-2 sm:col-span-1">
             <div className="flex items-center gap-2 text-[15px] font-semibold text-ink">
               <LogoMark size={20} /> {SITE.name}
             </div>

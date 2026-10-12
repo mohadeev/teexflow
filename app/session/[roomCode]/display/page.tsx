@@ -1,26 +1,24 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useParams } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition'
 import { loadSession } from '@/lib/actions/sessions'
 import { splitIntoParagraphs } from '@/lib/paragraphs'
 import { splitPages } from '@/lib/pages'
 import { regions } from '@/lib/code'
 import { ScriptText } from '@/components/script/ScriptText'
-import { follow, speakableWords } from '@/lib/voiceFollow'
+import { useVoiceFollow } from '@/hooks/useVoiceFollow'
+import { useLinkedDisplay, type Present } from '@/hooks/useLinkedDevices'
+import { useWakeLock } from '@/hooks/useWakeLock'
+import type { WhisperStatus } from '@/hooks/useWhisper'
+import { proseSpace } from '@/lib/proseFormat'
 import { CloseIcon, FlipHIcon, FlipVIcon, RotateIcon, SidebarIcon } from '@/components/icons'
 
 // Same lockout window — while the controller is streaming scroll messages,
 // the display's timer keeps resetting, so it stays a pure follower (no echo).
 const REMOTE_SCROLL_LOCKOUT_MS = 500
-
-// Voice follow keeps the line being read this far down the window.
-const VOICE_LINE_POSITION = 0.35
-// The recognizer's transcript is trimmed once it gets this long.
-const MAX_TRANSCRIPT_WORDS = 200
 
 type Segment = {
   text: string
@@ -33,6 +31,21 @@ type Segment = {
 export default function DisplayPage() {
   const { roomCode: rawCode } = useParams()
   const roomCode = String(rawCode).toUpperCase()
+  const router = useRouter()
+  // The display must not fall asleep mid-take.
+  useWakeLock()
+  // The script on screen; the room can switch to another (see useLinkedDevices).
+  const [scriptId, setScriptId] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+  // When signed in, present another script from the controller and this
+  // display switches to it.
+  useLinkedDisplay(
+    useCallback((p: Present) => {
+      if (p.roomCode.toUpperCase() !== roomCode) router.push(`/session/${p.roomCode}/display`)
+      else if (p.scriptId && scriptId && p.scriptId !== scriptId) setReloadKey((k) => k + 1)
+    }, [roomCode, router, scriptId]),
+    { roomCode, scriptId }
+  )
   // The whole script (all pages); only the current page is shown.
   const [fullContent, setFullContent] = useState<string>('')
   const [pageIndex, setPageIndex] = useState(0)
@@ -41,7 +54,6 @@ export default function DisplayPage() {
   const scriptContent = pages[currentPage] ?? ''
   const [loading, setLoading] = useState(true)
   const [missing, setMissing] = useState(false)
-  const [voiceUnsupported, setVoiceUnsupported] = useState(false)
   const pendingScrollRef = useRef<number | null>(null)
 
   const { send, subscribe, isConnected } = useWebSocket(roomCode)
@@ -70,20 +82,8 @@ export default function DisplayPage() {
 
   const [menuHidden, setMenuHidden] = useState(false)
 
-  // Voice follow: the last word the speaker said, as a page word index.
-  const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
-  // The same position as an index into `speakable.words`.
-  const voiceCursorRef = useRef(-1)
-  const voiceScrollTargetRef = useRef<number | null>(null)
-  const voiceScrollFrameRef = useRef<number | null>(null)
-
-  const {
-    transcript, listening, resetTranscript, browserSupportsSpeechRecognition, isMicrophoneAvailable,
-  } = useSpeechRecognition()
-
   useEffect(() => { speedRef.current = speed }, [speed])
   useEffect(() => { voiceModeRef.current = voiceMode }, [voiceMode])
-  const speakable = useMemo(() => speakableWords(scriptContent), [scriptContent])
 
   // Ask the controller for its current state whenever we (re)join the room.
   useEffect(() => {
@@ -98,6 +98,7 @@ export default function DisplayPage() {
         if (cancelled) return
         if (!snap) { setMissing(true); setLoading(false); return }
 
+        setScriptId(snap.scriptId)
         setIsPlaying(snap.status === 'playing')
 
         const s = snap.settings as Record<string, unknown>
@@ -119,7 +120,7 @@ export default function DisplayPage() {
       })
       .catch(() => { if (!cancelled) { setMissing(true); setLoading(false) } })
     return () => { cancelled = true }
-  }, [roomCode])
+  }, [roomCode, reloadKey])
 
   // Restore the saved scroll position once the script is on screen.
   useEffect(() => {
@@ -202,84 +203,21 @@ export default function DisplayPage() {
     setTimeout(() => { isRemoteScrollRef.current = false }, 250)
   }, [])
 
-  const startVoiceTracking = useCallback(() => {
-    if (!browserSupportsSpeechRecognition) { setVoiceUnsupported(true); return }
-    SpeechRecognition.startListening({ continuous: true, interimResults: true, language: navigator.language || 'en-US' })
-  }, [browserSupportsSpeechRecognition])
-
-  const stopVoiceTracking = useCallback(() => {
-    SpeechRecognition.stopListening(); setHighlightedIndex(null)
-    voiceCursorRef.current = -1
-  }, [])
-
-  // Browsers end recognition after a silence or a network blip; keep it going
-  // for as long as voice follow is on.
-  useEffect(() => {
-    if (!voiceMode || listening || voiceUnsupported || !isMicrophoneAvailable) return
-    const t = setTimeout(startVoiceTracking, 300)
-    return () => clearTimeout(t)
-  }, [voiceMode, listening, voiceUnsupported, isMicrophoneAvailable, startVoiceTracking])
-
-  // A new page or edited script: start following from the top of it again.
-  useEffect(() => { voiceCursorRef.current = -1 }, [scriptContent])
-
-  // Glides the window toward the voice target instead of jumping, and lets
-  // the controller follow along.
-  const glideToVoiceTarget = useCallback(() => {
-    if (voiceScrollFrameRef.current !== null) return
-    const step = () => {
-      const c = containerRef.current
-      const target = voiceScrollTargetRef.current
-      if (!c || target === null) { voiceScrollFrameRef.current = null; return }
-      const diff = target - c.scrollTop
-      if (Math.abs(diff) < 1) {
-        voiceScrollFrameRef.current = null
-        return
-      }
-      c.scrollTop += diff * 0.12
-      broadcastScroll(getScrollPercentage())
-      voiceScrollFrameRef.current = requestAnimationFrame(step)
-    }
-    voiceScrollFrameRef.current = requestAnimationFrame(step)
-  }, [broadcastScroll])
-
-  useEffect(() => () => {
-    if (voiceScrollFrameRef.current !== null) cancelAnimationFrame(voiceScrollFrameRef.current)
-  }, [])
-
-  // Puts page word `wordIndex` at the reading line.
-  const scrollToWord = useCallback((wordIndex: number) => {
-    const c = containerRef.current
-    const el = c?.querySelector<HTMLElement>(`[data-w="${wordIndex}"]`)
-    if (!c || !el) return
-    // offsetTop ignores the mirror/rotate transforms, unlike getBoundingClientRect.
-    let top = 0
-    for (let n: HTMLElement | null = el; n && n !== c; n = n.offsetParent as HTMLElement | null) top += n.offsetTop
-    const max = c.scrollHeight - c.clientHeight
-    voiceScrollTargetRef.current = Math.max(0, Math.min(max, top - c.clientHeight * VOICE_LINE_POSITION))
-    glideToVoiceTarget()
-  }, [glideToVoiceTarget])
-
-  // Follow the speaker: place what was just heard in the script, then move
-  // the highlight and the window (or the paragraph) there.
-  useEffect(() => {
-    if (!voiceMode || !transcript.trim()) return
-    const heard = transcript.trim().split(/\s+/)
-    if (heard.length > MAX_TRANSCRIPT_WORDS) resetTranscript()
-
-    const at = follow(heard, speakable.words, voiceCursorRef.current)
-    if (at === null || at === voiceCursorRef.current) return
-    voiceCursorRef.current = at
-    const wordIndex = speakable.wordIndex[at]
-    setHighlightedIndex(wordIndex)
-
-    if (paragraphMode) {
+  const voice = useVoiceFollow({
+    text: scriptContent,
+    vocabularyText: fullContent,
+    active: voiceMode,
+    containerRef,
+    scroll: !paragraphMode,
+    onScroll: broadcastScroll,
+    // In paragraph view, turn to the paragraph being read.
+    onWord: useCallback((wordIndex: number) => {
+      if (!paragraphMode) return
       const i = paragraphWordRanges.findIndex((r) => wordIndex >= r.start && wordIndex < r.end)
-      if (i !== -1 && i !== paragraphIndex) setParagraphIndex(i)
-    } else {
-      scrollToWord(wordIndex)
-    }
-  }, [transcript, voiceMode, speakable, resetTranscript, paragraphMode, paragraphIndex, paragraphWordRanges, scrollToWord])
+      if (i !== -1) setParagraphIndex(i)
+    }, [paragraphMode, paragraphWordRanges]),
+  })
+  const highlightedIndex = voice.said
 
   // --- Auto-scroll loop ---
   useEffect(() => {
@@ -344,8 +282,7 @@ export default function DisplayPage() {
     const unsubVoice = subscribe('voice', (payload) => {
       if (payload.from !== 'controller') return
       const active = payload.active
-      if (active && !voiceModeRef.current) { setVoiceMode(true); startVoiceTracking() }
-      else if (!active && voiceModeRef.current) { setVoiceMode(false); setVoiceUnsupported(false); stopVoiceTracking() }
+      setVoiceMode(!!active)
     })
     const unsubMirror = subscribe('mirror', (payload) => {
       if (payload.from !== 'controller') return
@@ -369,7 +306,6 @@ export default function DisplayPage() {
       const currentPct = getScrollPercentage()
       const receivedAt = Date.now()
       setFullContent(payload.content)
-      setHighlightedIndex(null)
       setRemoteSelection(null)
       requestAnimationFrame(() => {
         // A scroll from the controller that arrived after the new text wins.
@@ -384,7 +320,6 @@ export default function DisplayPage() {
     const unsubPage = subscribe('page', (payload) => {
       if (payload.from !== 'controller' || typeof payload.index !== 'number') return
       setPageIndex(Math.max(0, payload.index))
-      setHighlightedIndex(null)
       setRemoteSelection(null)
       if (containerRef.current) containerRef.current.scrollTop = 0
       requestAnimationFrame(() => { if (containerRef.current) containerRef.current.scrollTop = 0 })
@@ -419,7 +354,7 @@ export default function DisplayPage() {
       unsubMirror(); unsubFlipVertical(); unsubRotation(); unsubWidth()
       unsubScript(); unsubPage(); unsubSelection(); unsubParagraph(); unsubMenu(); unsubRefresh()
     }
-  }, [subscribe, applyScroll, startVoiceTracking, stopVoiceTracking])
+  }, [subscribe, applyScroll])
 
   if (loading) {
     return (
@@ -477,7 +412,7 @@ export default function DisplayPage() {
                 const globalIdx = currentRange.start + i
                 return (
                   <span key={i} className={`transition-colors duration-300 ${voiceClass(globalIdx, highlightedIndex) || 'text-ink'}`}>
-                    {word}{' '}
+                    {word}{proseSpace(' ', word, currentParagraphWords[i + 1] ?? '')}
                   </span>
                 )
               })
@@ -489,7 +424,7 @@ export default function DisplayPage() {
           {pages.length > 1 && `Page ${currentPage + 1}/${pages.length} · `}
           {paragraphs.length === 0 ? '0 / 0' : `${paragraphIndex + 1} / ${paragraphs.length}`}
           {!isConnected && ' · offline'}
-          {voiceMode && (voiceUnsupported ? ' · voice unsupported in this browser' : !isMicrophoneAvailable ? ' · allow the microphone' : ' · listening')}
+          {voiceMode && ` · ${voiceLabel(voice.status, voice.progress).toLowerCase()}`}
         </div>
       </div>
     )
@@ -516,8 +451,12 @@ export default function DisplayPage() {
             <span className="font-mono">{speed.toFixed(1)}×</span>
             {voiceMode && (
               <Status dot="bg-danger">
-                {voiceUnsupported ? 'Voice needs Chrome, Edge or Safari' : !isMicrophoneAvailable ? 'Allow the microphone' : listening ? 'Listening' : 'Voice'}
+                {voiceLabel(voice.status, voice.progress)}
               </Status>
+            )}
+            {/* What the microphone picked up last, so it's clear whether it hears you. */}
+            {voiceMode && voice.heard && (
+              <span className="max-w-[240px] truncate italic text-ink-3">“{voice.heard}”</span>
             )}
             {hasSelection && <Status dot="bg-caution">Spotlight</Status>}
             <span className="flex items-center gap-0.5">
@@ -588,7 +527,11 @@ export default function DisplayPage() {
                     cls += 'text-ink '
                   }
 
-                  return <span key={i} data-w={seg.wordIndex ?? undefined} className={cls}>{seg.text}</span>
+                  // In prose, each sentence starts a new line (only the spaces change).
+                  const shown = seg.wordIndex === null && /^\s+$/.test(seg.text)
+                    ? proseSpace(seg.text, segments[i - 1]?.text ?? '', segments[i + 1]?.text ?? '')
+                    : seg.text
+                  return <span key={i} data-w={seg.wordIndex ?? undefined} className={cls}>{shown}</span>
                 })
               }
             />
@@ -597,6 +540,21 @@ export default function DisplayPage() {
       </div>
     </div>
   )
+}
+
+const VOICE_STATUS: Record<WhisperStatus, string> = {
+  idle: 'Voice',
+  loading: 'Loading voice model…',
+  listening: 'Listening',
+  'needs-tap': 'Tap this screen to start listening',
+  'mic-blocked': 'Allow the microphone',
+  unsupported: 'Voice isn’t supported in this browser',
+  error: 'Couldn’t load the voice model',
+}
+
+function voiceLabel(status: WhisperStatus, progress: number) {
+  if (status === 'loading' && progress > 0 && progress < 1) return `Loading voice model… ${Math.round(progress * 100)}%`
+  return VOICE_STATUS[status]
 }
 
 // Voice follow colors: words already said fade, the next few light up.
