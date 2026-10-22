@@ -1,5 +1,6 @@
 'use client'
 
+import { track } from '@/lib/track'
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
@@ -460,9 +461,10 @@ export default function ControllerPage() {
   }
 
   const toggleVoiceMode = () => {
-    if (!voiceMode && !isPro) { setUpgradeOpen(true); return }
+    if (!voiceMode && !isPro) { setUpgradeOpen(true); track('upgrade_prompt', { feature: 'voice' }); return }
     const newState = !voiceMode
     setVoiceMode(newState); broadcastVoice(newState)
+    if (newState) track('voice_on')
     setDisplayVoice(null)
     setVoiceSince(Date.now())
     if (newState && isPlaying) {

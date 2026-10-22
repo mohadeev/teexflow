@@ -1,5 +1,6 @@
 'use client'
 
+import { track } from '@/lib/track'
 import { useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -33,6 +34,7 @@ export function SessionButtons() {
     setError(null)
     startTransition(async () => {
       const res = await startSession(id)
+      if (res.ok) track('session_started', { from: 'header' })
       if (res.ok) {
         setOpen(false)
         router.push(`/session/${res.roomCode}/controller`)

@@ -6,6 +6,8 @@ import { FREE_SCRIPT_LIMIT, PLANS, TRIAL_DAYS } from '@/lib/plans'
 import { Plans } from '@/components/billing/Plans'
 import { ManageSubscription } from '@/components/billing/ManageSubscription'
 import { CheckIcon } from '@/components/icons'
+import { PromoForm } from '@/components/billing/PromoForm'
+import { FOREVER_YEAR } from '@/lib/promo'
 
 export const metadata: Metadata = { title: 'Billing' }
 
@@ -26,6 +28,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
   // Full access from being an admin or an admin's grant, without a subscription.
   const granted = !billing.subscribed && billing.access
   const grantEnd = billing.grantUntil ? dateFmt.format(new Date(billing.grantUntil)) : null
+  const forever = !!billing.grantUntil && new Date(billing.grantUntil).getUTCFullYear() >= FOREVER_YEAR
 
   return (
     <main className="mx-auto max-w-[1080px] px-5 pb-24 pt-12">
@@ -65,7 +68,9 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
               {granted === 'admin'
                 ? 'Full access to everything, for good.'
                 : granted
-                  ? `Full access until ${grantEnd}, given by the TeexFlow team.`
+                  ? forever
+                    ? 'Full access, for good. Thanks for being an early user!'
+                    : `Full access until ${grantEnd}, given by the TeexFlow team.`
                   : pro
                     ? billing.canceled
                       ? trial
@@ -88,6 +93,16 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
           </p>
         )}
       </section>
+
+      {!billing.subscribed && billing.access !== 'admin' && (
+        <section className="card mt-6 p-7">
+          <p className="eyebrow">Promo code</p>
+          <p className="mt-2 text-[14px] text-ink-2">Got a code? Apply it to unlock Pro for free.</p>
+          <div className="mt-4">
+            <PromoForm />
+          </div>
+        </section>
+      )}
 
       <section className="mt-16">
         <h2 className="headline text-center text-[28px]">

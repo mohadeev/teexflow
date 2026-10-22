@@ -1,5 +1,6 @@
 'use client'
 
+import { track } from '@/lib/track'
 import { useState } from 'react'
 import Link from 'next/link'
 import { useAuth } from '@clerk/nextjs'
@@ -95,7 +96,7 @@ export function PricingCards({
             {currentPlan === 'pro' ? (
               <Link href="/dashboard/billing" className="btn btn-secondary mt-8 w-full">Manage subscription</Link>
             ) : isSignedIn ? (
-              <form action="/api/billing/checkout" method="POST" className="mt-8">
+              <form action="/api/billing/checkout" method="POST" className="mt-8" onSubmit={() => track('checkout_started', { interval })}>
                 <input type="hidden" name="interval" value={interval} />
                 <button className="btn btn-primary w-full">{trial ? 'Start free trial' : 'Upgrade to Pro'}</button>
               </form>

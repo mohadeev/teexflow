@@ -44,6 +44,13 @@ export default function PrivacyPage() {
             <strong>Technical data</strong> — IP address, browser type and request logs that our hosting provider keeps
             to run and secure the Service.
           </li>
+          <li>
+            <strong>Usage analytics</strong> — the pages you visit, how long you stay, the site that sent you, your
+            device type, browser, operating system and approximate country (worked out from your time zone or network,
+            never stored as an IP address), and actions you take in the app such as creating a script, starting a
+            session or turning on voice follow. When you’re signed in, this is linked to your account. We collect it
+            ourselves, use it only to understand and improve {SITE.name}, and never sell or share it with advertisers.
+          </li>
         </ul>
 
         <h2>Voice tracking and your microphone</h2>
@@ -93,15 +100,17 @@ export default function PrivacyPage() {
 
         <h2>Cookies</h2>
         <p>
-          We use only strictly necessary cookies: Clerk’s session cookies to keep you signed in, and Stripe’s cookies during
-          checkout for fraud prevention. We don’t use advertising or analytics cookies, so there is no cookie
-          banner to dismiss.
+          We use Clerk’s session cookies to keep you signed in, and Stripe’s cookies during checkout for fraud
+          prevention. For our own analytics we keep a random visitor ID and visit ID in your browser’s local storage,
+          so repeat visits can be counted; nothing is shared with third parties and we don’t use advertising cookies.
+          You can clear these at any time in your browser settings.
         </p>
 
         <h2>How long we keep data</h2>
         <ul>
           <li>Scripts and sessions: until you delete them or close your account.</li>
           <li>Account data: until you close your account.</li>
+          <li>Usage analytics: up to 24 months, and deleted with your account.</li>
           <li>Billing records: as long as tax law requires (typically up to 10 years).</li>
         </ul>
 

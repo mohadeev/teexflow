@@ -1,5 +1,6 @@
 'use client'
 
+import { track } from '@/lib/track'
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -98,6 +99,7 @@ export function ScriptEditor({
     startPresenting(async () => {
       if (!(await flush())) return
       const res = await startSession(id)
+      if (res.ok) track('session_started', { from: 'editor' })
       if (res.ok) router.push(`/session/${res.roomCode}/controller`)
       else setPresentError(res.error)
     })

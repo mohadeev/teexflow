@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next'
 import { ClerkProvider } from '@clerk/nextjs'
 import { SITE } from '@/lib/site'
+import { Analytics } from '@/components/Analytics'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -55,7 +56,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       afterSignOutUrl="/"
     >
       <html lang="en">
-        <body className="min-h-dvh">{children}</body>
+        <body className="min-h-dvh">
+          {children}
+          <Analytics />
+        </body>
       </html>
     </ClerkProvider>
   )

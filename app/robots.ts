@@ -8,7 +8,7 @@ export default async function robots(): Promise<MetadataRoute.Robots> {
       userAgent: '*',
       allow: '/',
       // The app behind sign-in, live sessions and API routes.
-      disallow: ['/dashboard', '/session/', '/display', '/start', '/api/'],
+      disallow: ['/dashboard', '/session/', '/display', '/start', '/redeem', '/api/'],
     },
     sitemap: `${BASE}/sitemap.xml`,
   }

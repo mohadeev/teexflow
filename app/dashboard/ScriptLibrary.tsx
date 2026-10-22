@@ -1,5 +1,6 @@
 'use client'
 
+import { track } from '@/lib/track'
 import { useRef, useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -51,7 +52,10 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
       body.append('file', file)
       const res = await fetch('/api/scripts/import', { method: 'POST', body })
       const data = (await res.json().catch(() => null)) as { ok: boolean; id?: string; error?: string; code?: string } | null
-      if (data?.ok && data.id) return router.push(`/dashboard/scripts/${data.id}`)
+      if (data?.ok && data.id) {
+        track('file_imported', { kind: file.name.split('.').pop()?.toLowerCase() })
+        return router.push(`/dashboard/scripts/${data.id}`)
+      }
       if (data?.code === 'limit') setLimitOpen(true)
       else setError(data?.error ?? 'The import failed. Please try again.')
     } catch {
@@ -71,7 +75,10 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
     if (atLimit) return setLimitOpen(true)
     startTransition(async () => {
       const res = await createScript()
-      if (res.ok) router.push(`/dashboard/scripts/${res.id}`)
+      if (res.ok) {
+        track('script_created')
+        router.push(`/dashboard/scripts/${res.id}`)
+      }
       else if (res.code === 'limit') setLimitOpen(true)
       else setError(res.error)
     })
@@ -81,6 +88,7 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
     setBusyId(id)
     startTransition(async () => {
       const res = await startSession(id)
+      if (res.ok) track('session_started', { from: 'library' })
       if (res.ok) router.push(`/session/${res.roomCode}/controller`)
       else {
         setError(res.error)
