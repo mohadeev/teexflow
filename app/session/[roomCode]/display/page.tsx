@@ -219,6 +219,17 @@ export default function DisplayPage() {
   })
   const highlightedIndex = voice.said
 
+  // Report what the microphone is doing to the controller, where the person
+  // reading can see it (this screen's status bar is often hidden).
+  const voiceReport = JSON.stringify({ status: voice.status, progress: Math.round(voice.progress * 20) / 20, heard: voice.heard })
+  useEffect(() => {
+    if (!voiceMode || !isConnected) return
+    const report = () => send('voice-status', { ...JSON.parse(voiceReport), from: 'display' })
+    report()
+    const t = setInterval(report, 4000)
+    return () => clearInterval(t)
+  }, [voiceMode, isConnected, voiceReport, send])
+
   // --- Auto-scroll loop ---
   useEffect(() => {
     if (voiceMode || paragraphMode) {
@@ -393,6 +404,7 @@ export default function DisplayPage() {
   if (paragraphMode) {
     return (
       <div className="flex min-h-dvh items-center justify-center overflow-hidden bg-black p-4">
+        {voiceMode && <VoiceAlert status={voice.status} />}
         <div
           className="w-full h-[90vh] flex items-center justify-center"
           style={{
@@ -433,6 +445,7 @@ export default function DisplayPage() {
   // ========== NORMAL SCROLLING VIEW ==========
   return (
     <div className="flex min-h-dvh flex-col items-center justify-center bg-black p-6">
+      {voiceMode && <VoiceAlert status={voice.status} />}
       <button
         onClick={toggleMenu}
         title={menuHidden ? 'Show status' : 'Hide status'}
@@ -550,6 +563,25 @@ const VOICE_STATUS: Record<WhisperStatus, string> = {
   'mic-blocked': 'Allow the microphone',
   unsupported: 'Voice isn’t supported in this browser',
   error: 'Couldn’t load the voice model',
+}
+
+// Voice follow can't start without the person in front of the screen: say so
+// in the middle of it, where it can't be missed.
+function VoiceAlert({ status }: { status: WhisperStatus }) {
+  const text =
+    status === 'needs-tap' ? 'Tap anywhere to start voice follow'
+    : status === 'mic-blocked' ? 'Allow the microphone for this site to use voice follow'
+    : status === 'error' ? 'The voice model couldn’t load. Check the internet connection and turn Voice off and on.'
+    : status === 'unsupported' ? 'This browser can’t run voice follow. Try Chrome, Edge, Safari or Firefox.'
+    : null
+  if (!text) return null
+  return (
+    <div className="pointer-events-none fixed inset-x-0 top-1/2 z-50 flex -translate-y-1/2 justify-center px-6">
+      <p className="max-w-[520px] rounded-3xl border border-caution/40 bg-black/90 px-7 py-5 text-center text-[22px] font-medium text-ink shadow-[0_20px_60px_rgb(0_0_0/0.7)]">
+        {text}
+      </p>
+    </div>
+  )
 }
 
 function voiceLabel(status: WhisperStatus, progress: number) {

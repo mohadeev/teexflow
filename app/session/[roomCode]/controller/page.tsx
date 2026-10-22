@@ -108,6 +108,9 @@ export default function ControllerPage() {
   const lastRemoteScrollAtRef = useRef(0)
 
   const [voiceMode, setVoiceMode] = useState(false)
+  // What the display's microphone is actually doing, as it reports it.
+  const [voiceSince, setVoiceSince] = useState(0)
+  const [displayVoice, setDisplayVoice] = useState<{ status: string; progress: number; heard: string; at: number } | null>(null)
   const [mirrorMode, setMirrorMode] = useState(false)
   const [flipVertical, setFlipVertical] = useState(false)
   const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0)
@@ -324,6 +327,9 @@ export default function ControllerPage() {
     broadcastParagraph(paragraphMode, paragraphIndex)
     broadcastMenu(menuHidden)
     broadcastControl(isPlaying ? 'play' : 'pause')
+    // A display that just opened (or reloaded after switching scripts) must
+    // know voice follow is on, or it never starts listening.
+    broadcastVoice(voiceMode)
     // Let the display lay out the new text before positioning it.
     setTimeout(() => broadcastScroll(getScrollPercentage()), 150)
   }
@@ -334,6 +340,12 @@ export default function ControllerPage() {
     if (!isConnected || loading) return
     broadcastStateRef.current()
   }, [isConnected, loading])
+
+  useEffect(() => {
+    return subscribe('voice-status', (p) => {
+      if (p?.from === 'display') setDisplayVoice({ status: p.status, progress: p.progress ?? 0, heard: p.heard ?? '', at: Date.now() })
+    })
+  }, [subscribe])
 
   useEffect(() => {
     return subscribe('hello', (payload) => {
@@ -451,6 +463,8 @@ export default function ControllerPage() {
     if (!voiceMode && !isPro) { setUpgradeOpen(true); return }
     const newState = !voiceMode
     setVoiceMode(newState); broadcastVoice(newState)
+    setDisplayVoice(null)
+    setVoiceSince(Date.now())
     if (newState && isPlaying) {
       setIsPlaying(false); broadcastControl('pause')
       persistPlayback('paused')
@@ -763,8 +777,9 @@ export default function ControllerPage() {
                 className={`btn btn-sm ${voiceMode ? 'bg-danger text-white hover:bg-danger/90' : 'btn-secondary'}`}
               >
                 {voiceMode ? <span className="animate-pulse-ring h-2 w-2 rounded-full bg-white" /> : isPro ? <MicIcon size={15} /> : <LockIcon size={14} />}
-                {voiceMode ? 'Listening' : 'Voice'}
+                {voiceMode ? 'Voice on' : 'Voice'}
               </button>
+              {voiceMode && <VoiceStatus report={displayVoice} since={voiceSince} />}
 
               {!isEditing ? (
                 <button onClick={handleEnterEdit} disabled={paragraphMode} className="btn btn-sm btn-secondary">
@@ -1100,5 +1115,62 @@ function PageBar({
       )}
       {!hasNext && pageDone && !compact && <span className="text-[12px] text-ink-3">Last page</span>}
     </div>
+  )
+}
+
+// What voice follow is doing on the display, so problems there (microphone
+// blocked, page never tapped, model still loading) show up on the controller.
+function VoiceStatus({
+  report,
+  since,
+}: {
+  report: { status: string; progress: number; heard: string; at: number } | null
+  since: number
+}) {
+  const [now, setNow] = useState(0)
+  useEffect(() => {
+    const tick = () => setNow(Date.now())
+    const first = setTimeout(tick, 0)
+    const t = setInterval(tick, 2000)
+    return () => {
+      clearTimeout(first)
+      clearInterval(t)
+    }
+  }, [])
+
+  const fresh = report && now - report.at < 12000
+  let tone = 'text-ink-3'
+  let text: string
+  if (!fresh) {
+    const waited = now - Math.max(since, report?.at ?? 0) > 8000
+    text = waited ? 'No display is listening — open the display' : 'Waiting for the display…'
+    if (waited) tone = 'text-caution'
+  } else if (report.status === 'loading') {
+    text = report.progress > 0 && report.progress < 1
+      ? `Display loading voice model… ${Math.round(report.progress * 100)}%`
+      : 'Display loading voice model…'
+  } else if (report.status === 'needs-tap') {
+    text = 'Tap the display screen once to start listening'
+    tone = 'text-caution'
+  } else if (report.status === 'mic-blocked') {
+    text = 'Allow the microphone on the display'
+    tone = 'text-danger'
+  } else if (report.status === 'unsupported') {
+    text = 'The display’s browser can’t run voice follow'
+    tone = 'text-danger'
+  } else if (report.status === 'error') {
+    text = 'The display couldn’t load the voice model — check its internet'
+    tone = 'text-danger'
+  } else if (report.heard) {
+    text = `Hearing: “${report.heard}”`
+    tone = 'text-positive'
+  } else {
+    text = 'Display is listening — start reading'
+    tone = 'text-positive'
+  }
+  return (
+    <span className={`max-w-[260px] truncate text-[12px] ${tone}`} aria-live="polite" title={text}>
+      {text}
+    </span>
   )
 }
