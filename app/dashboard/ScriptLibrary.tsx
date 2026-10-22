@@ -6,6 +6,8 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createScript, deleteScript, startSession } from '@/lib/actions/scripts'
 import { Dialog } from '@/components/app/Dialog'
+import { FeedbackButton } from '@/components/app/FeedbackButton'
+import { SITE } from '@/lib/site'
 import { DocIcon, PlayIcon, PlusIcon, TrashIcon, UploadIcon } from '@/components/icons'
 
 type Item = { id: string; title: string; excerpt: string; words: number; pages: number; updatedAt: string }
@@ -277,6 +279,10 @@ export function ScriptLibrary({ scripts, pro, limit }: { scripts: Item[]; pro: b
       >
         This script and any sessions using it will be removed. This can’t be undone.
       </Dialog>
+      <p className="mt-16 text-center text-[13px] text-ink-3">
+        Ideas or problems? <FeedbackButton variant="link" /> · or email{' '}
+        <a href={`mailto:${SITE.contactEmail}`} className="link">{SITE.contactEmail}</a>
+      </p>
     </main>
   )
 }

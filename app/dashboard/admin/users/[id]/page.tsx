@@ -22,6 +22,7 @@ const EVENT_LABELS: Record<string, string> = {
   promo_claimed: 'Claimed a promo code',
   checkout_started: 'Started checkout',
   upgrade_prompt: 'Saw the upgrade prompt',
+  feedback_sent: 'Sent feedback',
 }
 
 function minutes(from: string, to: string) {

@@ -5,7 +5,8 @@ export const SITE = {
   // The public address, for canonical links, share images and the sitemap.
   url: (process.env.NEXT_PUBLIC_SITE_URL || 'https://teexflow.com').replace(/\/$/, ''),
   legalName: process.env.NEXT_PUBLIC_LEGAL_NAME || 'TeexFlow',
-  contactEmail: process.env.NEXT_PUBLIC_CONTACT_EMAIL || 'support@teexflow.com',
+  // Support address shown to users. A free mailbox for now; set NEXT_PUBLIC_CONTACT_EMAIL to change it.
+  contactEmail: process.env.NEXT_PUBLIC_CONTACT_EMAIL || 'skendoulmohamed@gmail.com',
   address: process.env.NEXT_PUBLIC_LEGAL_ADDRESS || '',
   governingLaw: process.env.NEXT_PUBLIC_GOVERNING_LAW || 'France',
   legalUpdated: 'October 9, 2026',

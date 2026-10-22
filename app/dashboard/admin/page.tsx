@@ -29,6 +29,7 @@ const ACTION_LABELS: Record<string, string> = {
   promo_claimed: 'Promo code claimed',
   checkout_started: 'Checkout started',
   upgrade_prompt: 'Saw the upgrade prompt',
+  feedback_sent: 'Sent feedback',
 }
 
 export default async function AdminOverview({ searchParams }: { searchParams: Promise<{ days?: string }> }) {
