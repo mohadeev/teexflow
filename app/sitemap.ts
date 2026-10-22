@@ -1,11 +1,12 @@
 import type { MetadataRoute } from 'next'
+import { siteBase } from '@/lib/siteBase'
 import { LANDING_PAGES } from '@/lib/landing'
 import { GUIDES } from '@/lib/guides'
 
-const BASE = (process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000').replace(/\/$/, '')
 
 // Public pages only; the app itself (dashboard, sessions) isn't for search.
-export default function sitemap(): MetadataRoute.Sitemap {
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  const BASE = await siteBase()
   const now = new Date()
   return [
     { url: `${BASE}/`, lastModified: now, changeFrequency: 'weekly', priority: 1 },

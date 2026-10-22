@@ -1,8 +1,8 @@
 import type { MetadataRoute } from 'next'
+import { siteBase } from '@/lib/siteBase'
 
-const BASE = (process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000').replace(/\/$/, '')
-
-export default function robots(): MetadataRoute.Robots {
+export default async function robots(): Promise<MetadataRoute.Robots> {
+  const BASE = await siteBase()
   return {
     rules: {
       userAgent: '*',
