@@ -4,7 +4,7 @@ import { SITE } from '@/lib/site'
 import './globals.css'
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'),
+  metadataBase: new URL(SITE.url),
   title: {
     default: `${SITE.name} — The teleprompter that follows your voice`,
     template: `%s · ${SITE.name}`,
